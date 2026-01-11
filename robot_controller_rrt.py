@@ -72,9 +72,8 @@ class RobotControllerRRT:
             cv2.createTrackbar(f"Joint {i+1}", self.control_window, initial_value, 360, lambda x: None)
         
         # Create trackbars for gripper (2 joints, typically controlled together)
-        # Range 0-100 maps to -50 to +50 degrees. Start at 80 (30 degrees, open)
-        cv2.createTrackbar("Gripper L", self.control_window, 80, 100, lambda x: None)
-        cv2.createTrackbar("Gripper R", self.control_window, 80, 100, lambda x: None)
+        cv2.createTrackbar("Gripper L", self.control_window, self.gripper_home + 50, 100, lambda x: None)
+        cv2.createTrackbar("Gripper R", self.control_window, self.gripper_home + 50, 100, lambda x: None)
         
         # Create trackbars for wrist camera offset (cm, range -50 to 50)
         cv2.createTrackbar("Cam Offset X", self.control_window, 35, 100, lambda x: None)
@@ -153,34 +152,18 @@ class RobotControllerRRT:
     def _apply_gripper_positions(self, gripper_l_rad, gripper_r_rad):
         """Apply gripper positions to robot (if gripper joints exist)"""
         if len(self.env.arm_joint_indices) >= 8:
-            # Use POSITION_CONTROL with sufficient force
             p.setJointMotorControl2(
                 self.env.robot_id, self.env.arm_joint_indices[6],
                 p.POSITION_CONTROL,
                 targetPosition=gripper_l_rad,
-                force=100,  # Increased force
-                maxVelocity=1.0
+                force=50
             )
             p.setJointMotorControl2(
                 self.env.robot_id, self.env.arm_joint_indices[7],
                 p.POSITION_CONTROL,
                 targetPosition=gripper_r_rad,
-                force=100,  # Increased force
-                maxVelocity=1.0
+                force=50
             )
-        else:
-            # Fallback: try to find gripper joints by name
-            for i in range(p.getNumJoints(self.env.robot_id)):
-                joint_info = p.getJointInfo(self.env.robot_id, i)
-                joint_name = joint_info[1].decode('utf-8')
-                if 'finger' in joint_name.lower() or 'gripper' in joint_name.lower():
-                    p.setJointMotorControl2(
-                        self.env.robot_id, i,
-                        p.POSITION_CONTROL,
-                        targetPosition=gripper_l_rad if 'left' in joint_name.lower() or '1' in joint_name else gripper_r_rad,
-                        force=100,
-                        maxVelocity=1.0
-                    )
     
     def _update_camera_parameters(self, cam_params):
         """Update environment camera parameters"""
@@ -594,39 +577,13 @@ class RobotControllerRRT:
             print("[Gripper] Opening")
             gripper_l_rad = np.radians(50)  # Open position
             gripper_r_rad = np.radians(50)
-            # Apply gripper position and simulate
-            for _ in range(60):  # Simulate for 2 seconds at 30fps
-                self._apply_gripper_positions(gripper_l_rad, gripper_r_rad)
-                p.stepSimulation()
-                if _ % 10 == 0:  # Update camera every 10 steps
-                    obs = {
-                        'images': self.env.get_camera_images(),
-                        'state': self.env.get_state()
-                    }
-                    self._display_cameras(obs)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                time.sleep(self.env.dt)
-            print("[Gripper] ✓ Opened")
+            self._apply_gripper_positions(gripper_l_rad, gripper_r_rad)
         
         elif cmd == 'close':
             print("[Gripper] Closing")
             gripper_l_rad = np.radians(-50)  # Closed position
             gripper_r_rad = np.radians(-50)
-            # Apply gripper position and simulate
-            for _ in range(60):  # Simulate for 2 seconds at 30fps
-                self._apply_gripper_positions(gripper_l_rad, gripper_r_rad)
-                p.stepSimulation()
-                if _ % 10 == 0:  # Update camera every 10 steps
-                    obs = {
-                        'images': self.env.get_camera_images(),
-                        'state': self.env.get_state()
-                    }
-                    self._display_cameras(obs)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                time.sleep(self.env.dt)
-            print("[Gripper] ✓ Closed")
+            self._apply_gripper_positions(gripper_l_rad, gripper_r_rad)
         
         elif cmd == 'gripper' and len(parts) >= 2:
             try:
@@ -636,20 +593,7 @@ class RobotControllerRRT:
                 angle_deg = -50 + state * 100
                 angle_rad = np.radians(angle_deg)
                 print(f"[Gripper] Setting to {state:.2f} (0=closed, 1=open)")
-                # Apply gripper position and simulate
-                for _ in range(60):  # Simulate for 2 seconds at 30fps
-                    self._apply_gripper_positions(angle_rad, angle_rad)
-                    p.stepSimulation()
-                    if _ % 10 == 0:  # Update camera every 10 steps
-                        obs = {
-                            'images': self.env.get_camera_images(),
-                            'state': self.env.get_state()
-                        }
-                        self._display_cameras(obs)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                    time.sleep(self.env.dt)
-                print(f"[Gripper] ✓ Set to {state:.2f}")
+                self._apply_gripper_positions(angle_rad, angle_rad)
             except ValueError:
                 print("✗ Invalid gripper value. Use 0.0 (closed) to 1.0 (open)")
         

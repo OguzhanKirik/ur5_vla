@@ -242,7 +242,7 @@ class Robot(ABC):
                 joint_dist = np.linalg.norm(joint_delta)
                 joint_dist = joint_dist if joint_dist != 0 else 1
                 joint_delta = joint_delta / joint_dist
-                step_times_velocity = np.min(self.joints_max_velocities) * self.sim_step
+                step_times_velocity = n¬p.min(self.joints_max_velocities) * self.sim_step
                 if joint_dist > step_times_velocity:
                     joint_mul = step_times_velocity
                 else:
