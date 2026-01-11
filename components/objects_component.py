@@ -239,6 +239,7 @@ class ObjectsComponent:
             ('box', 0.03, [0.5, 0.4, table_height + 0.015], [1, 0, 0, 1]),  # Red cube
             ('sphere', 0.025, [0.3, 0.3, table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
             ('cylinder', (0.02, 0.05), [0.7, 0.5, table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
+            ('box', 0.03, [0.6, 0.3, table_height + 0.015], [0, 0, 1, 1]),  # Blue cube
         ]
         
         spawned_ids = []
