@@ -57,7 +57,7 @@ def main():
     robot.load()
     print(f"✓ Robot loaded at front edge center: {robot.position}")
     
-    # Spawn graspable objects on the table (includes a red box)
+    # Spawn graspable objects on the table (includes a red sphere and a red cylinder)
     spawned_ids = objects.spawn_graspable_objects(
         table_height=table_height,
         workspace_bounds=None  # Use default workspace
@@ -77,7 +77,7 @@ def main():
     print(f"✓ Container box created at left corner: {container_pos}")
     
     # The blue cylinder is the third object (index 2) according to objects_component.py
-    # spawned_ids[0] = red box, spawned_ids[1] = green sphere, spawned_ids[2] = blue cylinder
+    # spawned_ids[0] = red sphere, spawned_ids[1] = green sphere, spawned_ids[2] = blue cylinder
     target_object_id = spawned_ids[2]
     target_pos, _ = p.getBasePositionAndOrientation(target_object_id)
     print(f"\n=== Target Object ===")

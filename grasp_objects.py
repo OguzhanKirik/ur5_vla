@@ -357,8 +357,8 @@ def main():
     )
     print(f"✓ Spawned {len(spawned_ids)} objects with randomized positions")
     
-    # Object names for reference
-    object_names = ["red box", "green sphere", "blue cylinder", "blue box"]
+    # Object names for reference (updated: red sphere, green sphere, blue cylinder, red cylinder)
+    object_names = ["red sphere", "green sphere", "blue cylinder", "red cylinder"]
     
     # Create container box
     container_pos = [0.15, 0.15, table_height]

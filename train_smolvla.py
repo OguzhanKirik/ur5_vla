@@ -36,7 +36,8 @@ class UR5GraspDataset(Dataset):
         self.dataset_dir = Path(dataset_dir)
         self.processor = processor
         self.chunk_size = chunk_size
-        self.max_text_length = 77  # Standard for vision-language models
+        # in-memory cache for processed episodes (lazy per-episode caching)
+        self._processed_cache = {}
         
         # Load metadata
         metadata_path = self.dataset_dir / "metadata.json"
@@ -83,41 +84,129 @@ class UR5GraspDataset(Dataset):
         frame_idx = sample['frame_idx']
         top_rgb_path = self.dataset_dir / sample['video_paths']['top_rgb']
         wrist_rgb_path = self.dataset_dir / sample['video_paths']['wrist_rgb']
-        
+        # Note: depth videos are corrupted (257 bytes), so we'll use a dummy camera
+
         # Load single frame at frame_idx
         top_image = self.load_video_frame(top_rgb_path, frame_idx)
         wrist_image = self.load_video_frame(wrist_rgb_path, frame_idx)
+
+        # Lazy per-episode caching: process frames on first access using the
+        # processor, save compressed .npz under dataset/processed/, and reuse
+        # the cached pixel_values for subsequent accesses. This avoids the
+        # tokenizer/processor shape mismatches and keeps training fast after
+        # the first epoch.
+        ep_id = sample['episode_id']
+        processed_dir = self.dataset_dir / "processed"
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        processed_path = processed_dir / f"episode_{ep_id:04d}.npz"
+
+        if not processed_path.exists():
+            # Build processed arrays for the whole episode
+            with open(self.dataset_dir / f"episode_{ep_id:04d}.json", 'r') as ef:
+                ep = json.load(ef)
+            n_frames = len(ep.get('frames', []))
+            top_video = self.dataset_dir / ep.get('videos', {}).get('top_rgb', '')
+            wrist_video = self.dataset_dir / ep.get('videos', {}).get('wrist_rgb', '')
+
+            top_list = []
+            wrist_list = []
+            for i in range(n_frames):
+                top_img = self.load_video_frame(top_video, i) if top_video.exists() else None
+                wrist_img = self.load_video_frame(wrist_video, i) if wrist_video.exists() else None
+
+                if top_img is None:
+                    top_list.append(None)
+                else:
+                    proc = self.processor(images=top_img, return_tensors="pt")
+                    pv = proc.get('pixel_values')
+                    top_list.append(pv[0].cpu().numpy() if pv is not None else None)
+
+                if wrist_img is None:
+                    wrist_list.append(None)
+                else:
+                    proc = self.processor(images=wrist_img, return_tensors="pt")
+                    pv = proc.get('pixel_values')
+                    wrist_list.append(pv[0].cpu().numpy() if pv is not None else None)
+
+            def stack_or_zeros(lst):
+                if any(x is not None for x in lst):
+                    first = next(x for x in lst if x is not None)
+                    arrs = [x if x is not None else np.zeros_like(first) for x in lst]
+                    return np.stack(arrs)
+                return np.zeros((0,))
+
+            np_top = stack_or_zeros(top_list)
+            np_wrist = stack_or_zeros(wrist_list)
+            np.savez_compressed(processed_path, top_pixel_values=np_top, wrist_pixel_values=np_wrist)
+
+        # Load processed data into in-memory cache to avoid repeated IO
+        if ep_id not in self._processed_cache:
+            arr = np.load(processed_path)
+            self._processed_cache[ep_id] = {
+                'top_pixel_values': arr['top_pixel_values'],
+                'wrist_pixel_values': arr['wrist_pixel_values'],
+            }
+
+        proc_data = self._processed_cache[ep_id]
+        # pick the requested frame (fallback to last frame or zeros)
+        if proc_data['top_pixel_values'].ndim == 4 and proc_data['top_pixel_values'].shape[0] > 0:
+            if frame_idx < proc_data['top_pixel_values'].shape[0]:
+                top_arr = proc_data['top_pixel_values'][frame_idx]
+            else:
+                top_arr = proc_data['top_pixel_values'][-1]
+        else:
+            top_arr = np.zeros((3, 224, 224), dtype=np.float32)
+
+        if proc_data['wrist_pixel_values'].ndim == 4 and proc_data['wrist_pixel_values'].shape[0] > 0:
+            if frame_idx < proc_data['wrist_pixel_values'].shape[0]:
+                wrist_arr = proc_data['wrist_pixel_values'][frame_idx]
+            else:
+                wrist_arr = proc_data['wrist_pixel_values'][-1]
+        else:
+            wrist_arr = np.zeros((3, 224, 224), dtype=np.float32)
+
+        top_tensor = torch.from_numpy(top_arr)
+        wrist_tensor = torch.from_numpy(wrist_arr)
         
+        # Create simple boolean presence masks (True = image is present)
+        # SmolVLA expects single boolean values per image, not pixel-level masks
+        top_mask_tensor = torch.tensor(True, dtype=torch.bool)
+        wrist_mask_tensor = torch.tensor(True, dtype=torch.bool)
+
         # Get state (single state vector)
         state = np.array(sample['state'], dtype=np.float32)
-        
+
         # Get action chunk (sequence of future actions)
         actions = np.array(sample['actions'], dtype=np.float32)
-        
+
         # Pad actions to chunk_size if needed
         if len(actions) < self.chunk_size:
             pad_length = self.chunk_size - len(actions)
             actions = np.vstack([actions, np.tile(actions[-1:], (pad_length, 1))])
-        
-        # Tokenize language instruction using processor
+
+        # Tokenize language instruction using processor.tokenizer
+        # Don't pad here - let the dataloader handle it
         text_inputs = self.processor.tokenizer(
             instruction,
             return_tensors="pt",
-            padding="max_length",
+            padding=False,
             truncation=True,
-            max_length=self.max_text_length
+            max_length=256  # Use a larger max but don't pad yet
         )
-        
-        # Return single observation (image + state) with action chunk
-        # Use camera1/camera2 naming convention expected by SmolVLA policy
-        return {
-            'observation.images.camera1': self.preprocess_image(top_image),
-            'observation.images.camera2': self.preprocess_image(wrist_image),
+
+        out = {
+            'observation.images.camera1': top_tensor,
+            'observation.images.camera2': wrist_tensor,
+            # camera3 will be created as empty by the model since empty_cameras=1
             'observation.state': torch.from_numpy(state),
             'observation.language.tokens': text_inputs['input_ids'].squeeze(0),
             'observation.language.attention_mask': text_inputs['attention_mask'].squeeze(0).bool(),  # Convert to boolean
             'action': torch.from_numpy(actions),
+            'observation.images.camera1_padding_mask': top_mask_tensor,
+            'observation.images.camera2_padding_mask': wrist_mask_tensor,
+            # No camera3_padding_mask needed - model will handle it
         }
+        return out
     
     def load_video_frame(self, video_path, frame_idx):
         """Load a specific frame from video file"""
@@ -150,6 +239,53 @@ class UR5GraspDataset(Dataset):
         # Normalize to [0, 1] range
         tensor = tensor / 255.0
         return tensor
+
+
+def collate_fn(batch):
+    """Custom collate function to handle dynamic text padding"""
+    # Find max text length in batch
+    max_text_len = max(b['observation.language.tokens'].shape[0] for b in batch)
+    
+    # Pad all text tokens to same length
+    padded_batch = {}
+    for key in batch[0].keys():
+        if key == 'observation.language.tokens':
+            # Pad tokens with 0 (pad_token_id)
+            padded_tokens = []
+            for b in batch:
+                tokens = b[key]
+                padding_len = max_text_len - tokens.shape[0]
+                if padding_len > 0:
+                    padded = torch.cat([tokens, torch.zeros(padding_len, dtype=tokens.dtype)])
+                else:
+                    padded = tokens
+                padded_tokens.append(padded)
+            padded_batch[key] = torch.stack(padded_tokens)
+        elif key == 'observation.language.attention_mask':
+            # Pad attention masks with False
+            padded_masks = []
+            for b in batch:
+                mask = b[key]
+                padding_len = max_text_len - mask.shape[0]
+                if padding_len > 0:
+                    padded = torch.cat([mask, torch.zeros(padding_len, dtype=torch.bool)])
+                else:
+                    padded = mask
+                padded_masks.append(padded)
+            padded_batch[key] = torch.stack(padded_masks)
+        elif '_padding_mask' in key or '_mask' in key:
+            # For image padding masks, keep as 1D tensor (one bool per sample)
+            # Don't unsqueeze scalar tensors
+            masks = [b[key] for b in batch]
+            if masks[0].ndim == 0:  # scalar tensor
+                padded_batch[key] = torch.stack(masks)
+            else:
+                padded_batch[key] = torch.stack(masks)
+        else:
+            # Stack other tensors normally
+            padded_batch[key] = torch.stack([b[key] for b in batch])
+    
+    return padded_batch
 
 
 def main():
@@ -210,7 +346,8 @@ def main():
         shuffle=True,
         num_workers=0 if device.type == "mps" else 4,
         pin_memory=device.type == "cuda",
-        drop_last=True
+        drop_last=True,
+        collate_fn=collate_fn
     )
     
     val_loader = DataLoader(
@@ -219,12 +356,19 @@ def main():
         shuffle=False,
         num_workers=0 if device.type == "mps" else 4,
         pin_memory=device.type == "cuda",
-        drop_last=False
+        drop_last=False,
+        collate_fn=collate_fn
     )
     
     # Load SmolVLA policy from pretrained
     print("\nLoading SmolVLA policy from lerobot/smolvla_base...")
     policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
+    
+    # Update config to use only 2 cameras + 1 empty camera placeholder
+    # This allows us to provide only camera1 and camera2, and the model will handle the missing camera3
+    policy.config.empty_cameras = 1
+    print(f"Configured to use {len(policy.config.image_features)} cameras + {policy.config.empty_cameras} empty camera")
+    
     policy.train()
     policy.to(device)
     

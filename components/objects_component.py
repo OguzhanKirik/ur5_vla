@@ -265,19 +265,21 @@ class ObjectsComponent:
                     print(f"Warning: Could not find valid position for object {obj_idx}, using fallback")
                     positions.append([np.random.uniform(x_min, x_max), np.random.uniform(y_min, y_max)])
             
+            # Replace cubes with specified spheres/cylinders:
+            # - Red sphere, Green sphere, Blue cylinder, Red cylinder
             configs = [
-                ('box', 0.03, [positions[0][0], positions[0][1], table_height + 0.015], [1, 0, 0, 1]),  # Red cube
+                ('sphere', 0.025, [positions[0][0], positions[0][1], table_height + 0.025], [1, 0, 0, 1]),  # Red sphere
                 ('sphere', 0.025, [positions[1][0], positions[1][1], table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
                 ('cylinder', (0.02, 0.05), [positions[2][0], positions[2][1], table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
-                ('box', 0.03, [positions[3][0], positions[3][1], table_height + 0.015], [0, 0, 1, 1]),  # Blue cube
+                ('cylinder', (0.02, 0.05), [positions[3][0], positions[3][1], table_height + 0.025], [1, 0, 0, 1]),  # Red cylinder
             ]
         else:
+            # Fixed (non-random) configuration: red sphere, green sphere, blue cylinder, red cylinder
             configs = [
-                # (type, params, position, color)
-                ('box', 0.03, [0.5, 0.4, table_height + 0.015], [1, 0, 0, 1]),  # Red cube
+                ('sphere', 0.025, [0.5, 0.4, table_height + 0.025], [1, 0, 0, 1]),  # Red sphere
                 ('sphere', 0.025, [0.3, 0.3, table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
                 ('cylinder', (0.02, 0.05), [0.7, 0.5, table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
-                ('box', 0.03, [0.6, 0.3, table_height + 0.015], [0, 0, 1, 1]),  # Blue cube
+                ('cylinder', (0.02, 0.05), [0.6, 0.3, table_height + 0.025], [1, 0, 0, 1]),  # Red cylinder
             ]
         
         spawned_ids = []

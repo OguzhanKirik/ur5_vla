@@ -23,9 +23,6 @@ import pybullet as p
 import pybullet_data
 import time
 import cv2
-import os
-import traceback
-import requests
 
 from components import UR5RobotComponent, CameraComponent, ObjectsComponent, RobotController
 
@@ -44,28 +41,28 @@ class NumpyEncoder(json.JSONEncoder):
         return super(NumpyEncoder, self).default(obj)
 
 
-# Language instructions mapped to object indices (updated to new object set)
+# Language instructions mapped to object indices
 OBJECT_INSTRUCTIONS = {
-    0: "Pick up the red sphere and place it in the container",
+    0: "Pick up the red box and place it in the container",
     1: "Grasp the green sphere and put it in the box",
     2: "Pick up the blue cylinder and drop it in the container",
-    3: "Pick up the red cylinder and place it in the container",
+    3: "Grab the blue box and place it in the container",
     "all": "Pick up all objects and place them in the container one by one"
 }
 
-# Alternative phrasings for data augmentation (updated for new objects)
+# Alternative phrasings for data augmentation
 INSTRUCTION_VARIANTS = {
     0: [
-        "Pick up the red sphere and place it in the container",
-        "Grasp the red ball and move it to the box",
-        "Take the red sphere to the container",
-        "Put the red sphere in the container"
+        "Pick up the red box and place it in the container",
+        "Grasp the red cube and move it to the box",
+        "Take the red box to the container",
+        "Put the red cube in the container"
     ],
     1: [
         "Grasp the green sphere and put it in the box",
         "Pick up the green ball and place it in the container",
         "Take the green sphere to the box",
-        "Move the green sphere to the container"
+        "Move the green ball to the container"
     ],
     2: [
         "Pick up the blue cylinder and drop it in the container",
@@ -74,10 +71,10 @@ INSTRUCTION_VARIANTS = {
         "Move the blue cylinder into the box"
     ],
     3: [
-        "Pick up the red cylinder and place it in the container",
-        "Grasp the red cylinder and move it to the box",
-        "Take the red cylinder to the container",
-        "Put the red cylinder in the container"
+        "Grab the blue box and place it in the container",
+        "Pick up the blue cube and put it in the box",
+        "Take the blue box to the container",
+        "Move the blue cube into the container"
     ]
 }
 
@@ -110,10 +107,6 @@ class SmolVLADataCollector:
         
         self.episodes = []
         self.episode_count = 0
-        # attempt_count counts all attempts including failed ones
-        self.attempt_count = 0
-        # If True, only keep/save successful episodes (delete failed attempt files)
-        self.save_only_success = False
         
         # Video recording
         self.video_writers = {}
@@ -134,7 +127,7 @@ class SmolVLADataCollector:
             "video_types": ["top_rgb", "wrist_rgb", "top_depth"],
             "state_dim": 8,  # 6 joints + gripper_pos + gripper_state
             "action_dim": 7,  # 6 joints + gripper
-            "objects": ["red sphere", "green sphere", "blue cylinder", "red cylinder"]
+            "objects": ["red box", "green sphere", "blue cylinder", "blue box"]
         }
         
     def start_episode(self, instruction, object_idx):
@@ -148,28 +141,24 @@ class SmolVLADataCollector:
             "start_time": time.time()
         }
         
-        # Initialize video writers for this attempt (use temporary filenames)
+        # Initialize video writers for this episode (3 videos only)
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        # attempt-based temporary filename to avoid pre-reserving final episode ids
-        self.attempt_count += 1
-        temp_video_filename = f"temp_ep{self.attempt_count:04d}.mp4"
-
+        video_filename = f"ep{self.episode_count:04d}.mp4"
+        
         self.video_writers = {
             'top_rgb': cv2.VideoWriter(
-                str(self.top_rgb_dir / temp_video_filename),
+                str(self.top_rgb_dir / video_filename),
                 fourcc, self.video_fps, (640, 480)
             ),
             'wrist_rgb': cv2.VideoWriter(
-                str(self.wrist_rgb_dir / temp_video_filename),
+                str(self.wrist_rgb_dir / video_filename),
                 fourcc, self.video_fps, (640, 480)
             ),
             'top_depth': cv2.VideoWriter(
-                str(self.top_depth_dir / temp_video_filename),
+                str(self.top_depth_dir / video_filename),
                 fourcc, self.video_fps, (640, 480)
             ),
         }
-        # store temp filename for later rename/delete
-        self._current_temp_video_filename = temp_video_filename
         
     def add_frame(self, state, action, images):
         """
@@ -222,63 +211,28 @@ class SmolVLADataCollector:
         self.current_episode['success'] = bool(success)  # Ensure Python bool, not numpy
         self.current_episode['duration'] = float(time.time() - self.current_episode['start_time'])
         self.current_episode['num_frames'] = int(len(self.current_episode['frames']))
-
+        
         # Close video writers
         for writer in self.video_writers.values():
-            try:
-                writer.release()
-            except Exception:
-                pass
+            writer.release()
         self.video_writers = {}
-
-        # Decide whether to keep this attempt
-        temp_name = getattr(self, '_current_temp_video_filename', None)
-        if temp_name is None:
-            # fallback to default naming if something went wrong
-            temp_name = f"temp_ep{self.attempt_count:04d}.mp4"
-
-        if self.save_only_success and not success:
-            # delete temporary video files and do not save episode json
-            for vt in ['top_rgb', 'wrist_rgb', 'top_depth']:
-                try:
-                    path = self.videos_dir / vt / temp_name
-                    if path.exists():
-                        path.unlink()
-                except Exception:
-                    pass
-
-            # clear temp filename and return -1 for unsaved
-            self._current_temp_video_filename = None
-            return -1
-
-        # Otherwise save: move temp files to final numbered filenames and write metadata
+        
+        # Add video filenames to episode data
         video_filename = f"ep{self.episode_count:04d}.mp4"
-        for vt in ['top_rgb', 'wrist_rgb', 'top_depth']:
-            try:
-                src = self.videos_dir / vt / temp_name
-                dst = self.videos_dir / vt / video_filename
-                if src.exists():
-                    # replace if exists
-                    if dst.exists():
-                        dst.unlink()
-                    src.rename(dst)
-            except Exception:
-                pass
-
         self.current_episode['videos'] = {
             'top_rgb': f"videos/top_rgb/{video_filename}",
             'wrist_rgb': f"videos/wrist_rgb/{video_filename}",
             'top_depth': f"videos/top_depth/{video_filename}",
         }
-
+        
         # Remove start_time (not JSON serializable)
         del self.current_episode['start_time']
-
-        # Save episode JSON
+        
+        # Save episode
         episode_file = self.dataset_dir / f"episode_{self.episode_count:04d}.json"
         with open(episode_file, 'w') as f:
             json.dump(self.current_episode, f, indent=2, cls=NumpyEncoder)
-
+        
         self.episodes.append({
             "episode_id": self.episode_count,
             "instruction": self.current_episode['instruction'],
@@ -286,11 +240,9 @@ class SmolVLADataCollector:
             "num_frames": self.current_episode['num_frames'],
             "success": bool(success)
         })
-
-        saved_id = self.episode_count
+        
         self.episode_count += 1
-        self._current_temp_video_filename = None
-        return saved_id
+        return self.episode_count - 1
     
     def save_metadata(self):
         """Save dataset metadata"""
@@ -302,70 +254,6 @@ class SmolVLADataCollector:
             json.dump(self.metadata, f, indent=2, cls=NumpyEncoder)
         
         print(f"✓ Saved metadata to {metadata_file}")
-
-
-# Global flag to control fast headless simulation stepping
-FAST_SIM = False
-
-
-def sim_step(n: int = 1) -> None:
-    """Perform `n` physics steps. When `FAST_SIM` is True, skip sleeping to run as fast as possible."""
-    for _ in range(n):
-        p.stepSimulation()
-        if not FAST_SIM:
-            time.sleep(1.0 / 240.0)
-
-
-def expand_instruction_variants_with_gpt5(object_instructions: dict, model_name: str = "gpt-5-mini") -> dict:
-    """Expand `INSTRUCTION_VARIANTS` using an OpenAI GPT-5 model. Returns augmented dict.
-
-    Requires `OPENAI_API_KEY` env var. If the `openai` package is not available, uses HTTP requests.
-    This is optional and will quietly skip if no API key is present.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("OPENAI_API_KEY not set — skipping GPT-5 instruction augmentation")
-        return object_instructions
-
-    augmented = dict(object_instructions)
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    for idx, base in list(object_instructions.items()):
-        if idx == "all":
-            continue
-        prompt = (
-            f"Give 4 short alternative imperative phrasings (comma separated) of this instruction: \"{base}\"\n"
-            "Return only the paraphrases separated by the `|` character."
-        )
-
-        try:
-            url = "https://api.openai.com/v1/chat/completions"
-            body = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 120,
-                "temperature": 0.8,
-            }
-            resp = requests.post(url, headers=headers, json=body, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            # split by | or by newlines/commas
-            if "|" in text:
-                variants = [s.strip() for s in text.split("|") if s.strip()]
-            else:
-                parts = [p.strip() for p in text.replace("\n", ",").split(",") if p.strip()]
-                variants = parts[:4]
-
-            if variants:
-                augmented[idx] = variants
-                print(f"GPT-5: Augmented instruction {idx} with {len(variants)} variants")
-        except Exception:
-            print(f"Warning: GPT-5 augmentation failed for instruction {idx} — continuing without it")
-            traceback.print_exc()
-
-    return augmented
 
 
 def collect_demonstration_episode(robot, controller, camera, objects, spawned_ids, object_names, 
@@ -502,7 +390,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
         action = np.concatenate([action_pos, [0, 0, 0], [1]])  # gripper open
         controller.process_action(action)
         
-        sim_step(4)
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         if step % 10 == 0:
             camera.capture_all()
@@ -534,7 +424,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
         action = np.concatenate([action_pos, [0, 0, 0], [1]])
         controller.process_action(action)
         
-        sim_step(4)
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         if step % 10 == 0:
             camera.capture_all()
@@ -552,7 +444,8 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
     min_steps = 60
     
     for close_step in range(max_close_steps):
-        sim_step(1)
+        p.stepSimulation()
+        time.sleep(1./240.)
         
         if close_step >= min_steps:
             gripper_torques = []
@@ -574,7 +467,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
                         maxVelocity=0
                     )
                 
-                sim_step(10)
+                for _ in range(10):
+                    p.stepSimulation()
+                    time.sleep(1./240.)
                 break
         
         # Record data
@@ -622,7 +517,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
                     maxVelocity=0
                 )
         
-        sim_step(4)
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         if step % 8 == 0:
             state = get_robot_state(robot)
@@ -660,7 +557,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
                     maxVelocity=0
                 )
         
-        sim_step(4)
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         if step % 8 == 0:
             state = get_robot_state(robot)
@@ -678,7 +577,8 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
                     force=300,
                     maxVelocity=0
                 )
-        sim_step(1)
+        p.stepSimulation()
+        time.sleep(1./240.)
         
         if wait_step % 8 == 0:
             state = get_robot_state(robot)
@@ -696,7 +596,8 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
             maxVelocity=15.0  # Fast opening
         )
     for step in range(30):
-        sim_step(1)
+        p.stepSimulation()
+        time.sleep(1./240.)
         
         if step % 8 == 0:
             state = get_robot_state(robot)
@@ -706,7 +607,8 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
     
     # Let settle
     for step in range(100):
-        sim_step(1)
+        p.stepSimulation()
+        time.sleep(1./240.)
         
         if step % 8 == 0:
             state = get_robot_state(robot)
@@ -734,7 +636,9 @@ def collect_grasp_and_place(robot, controller, camera, target_object_id, contain
         action = np.concatenate([action_pos, [0, 0, 0], [1]])  # gripper open
         controller.process_action(action)
         
-        sim_step(4)
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         if step % 8 == 0:
             state = get_robot_state(robot)
@@ -754,10 +658,6 @@ def main():
     parser.add_argument("--output-dir", type=str, default="./datasets", help="Output directory")
     parser.add_argument("--dataset-name", type=str, default="smolvla_ur5_grasp", help="Dataset name")
     parser.add_argument("--gui", action="store_true", help="Show PyBullet GUI")
-    parser.add_argument("--fast", action="store_true", help="Run headless fast mode (no sleeps, batch simulation)")
-    parser.add_argument("--use-gpt5", action="store_true", help="Use GPT-5 to augment instruction variants (requires OPENAI_API_KEY)")
-    parser.add_argument("--openai-model", type=str, default="gpt-5-mini", help="OpenAI model name to use for augmentation")
-    parser.add_argument("--save-only-success", action="store_true", help="Only save successful episodes into dataset (delete failed attempts)")
     
     args = parser.parse_args()
     
@@ -771,17 +671,6 @@ def main():
     
     # Initialize data collector
     collector = SmolVLADataCollector(args.output_dir, args.dataset_name)
-
-    # Set fast simulation flag (only meaningful when not using GUI)
-    global FAST_SIM
-    FAST_SIM = bool(args.fast and not args.gui)
-    # Set collector behavior for saving only successful episodes
-    collector.save_only_success = bool(args.save_only_success)
-
-    # Optionally augment instruction variants using GPT-5
-    if args.use_gpt5:
-        global INSTRUCTION_VARIANTS
-        INSTRUCTION_VARIANTS = expand_instruction_variants_with_gpt5(INSTRUCTION_VARIANTS, model_name=args.openai_model)
     
     # Initialize PyBullet
     if args.gui:
@@ -826,7 +715,7 @@ def main():
     container_pos = [0.15, 0.15, table_height]
     objects.create_container_box(position=container_pos, size=[0.15, 0.15, 0.08])
     
-    object_names = ["red sphere", "green sphere", "blue cylinder", "red cylinder"]
+    object_names = ["red box", "green sphere", "blue cylinder", "blue box"]
     
     # Collect episodes
     successful_episodes = 0
@@ -850,7 +739,9 @@ def main():
         objects.create_container_box(position=container_pos, size=[0.15, 0.15, 0.08])
         
         # Let physics settle
-        sim_step(100)
+        for _ in range(100):
+            p.stepSimulation()
+            time.sleep(1./240.)
         
         # Select random object to grasp
         target_idx = np.random.randint(0, len(spawned_ids))
@@ -863,9 +754,7 @@ def main():
         
         if success:
             successful_episodes += 1
-
-        # If collector.save_only_success is True and the episode was not saved (end_episode returned -1),
-        # we should report it as FAILED for storage purposes.
+        
         print(f"Episode {episode_idx}: {object_names[target_idx]} - {'SUCCESS' if success else 'FAILED'}")
     
     # Save metadata
@@ -875,13 +764,9 @@ def main():
     print("\n" + "="*70)
     print("Collection Complete!")
     print("="*70)
-    print(f"Total attempted episodes: {args.episodes}")
-    print(f"Successful attempts: {successful_episodes} ({100*successful_episodes/args.episodes:.1f}%)")
-    print(f"Saved episodes (in dataset): {collector.episode_count}")
+    print(f"Total episodes: {args.episodes}")
+    print(f"Successful: {successful_episodes} ({100*successful_episodes/args.episodes:.1f}%)")
     print(f"Dataset location: {collector.dataset_dir}")
-    print("Saved episode files:")
-    for ep in collector.episodes:
-        print(f" - episode_{ep['episode_id']:04d}.json : {ep['instruction'][:60]}")
     print("="*70)
     
     p.disconnect()
