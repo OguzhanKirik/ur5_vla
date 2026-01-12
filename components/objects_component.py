@@ -150,6 +150,9 @@ class ObjectsComponent:
             basePosition=position
         )
         
+        # Set high friction for better gripping
+        p.changeDynamics(obj_id, -1, lateralFriction=2.0, spinningFriction=0.1, rollingFriction=0.01)
+        
         self.objects.append(obj_id)
         return obj_id
     
