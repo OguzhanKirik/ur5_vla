@@ -1,0 +1,10 @@
+# Ignore checkpoints and dataset folders
+checkpoints/
+datasets/
+# Python cache
+__pycache__/
+*.pyc
+# VSCode settings
+.vscode/
+# Log files
+*.log

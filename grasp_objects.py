@@ -348,9 +348,11 @@ def main():
     print(f"✓ Robot loaded at {robot.position}")
     
     # Spawn graspable objects with randomization
+    # Robot is at [0.5, 0, table_height] facing -Y direction
+    # Workspace bounds define reachable area: X [0.3, 0.7], Y [0.15, 0.5]
     spawned_ids = objects.spawn_graspable_objects(
         table_height=table_height,
-        workspace_bounds=[[0.3, 0.7], [0.3, 0.7]],
+        workspace_bounds=[[0.3, 0.7], [0.15, 0.5]],
         randomize=True
     )
     print(f"✓ Spawned {len(spawned_ids)} objects with randomized positions")
@@ -428,9 +430,10 @@ def main():
             grasped_objects.clear()
             
             # Respawn objects with randomized positions
+            # Keep same workspace bounds as initial spawn
             spawned_ids = objects.spawn_graspable_objects(
                 table_height=table_height,
-                workspace_bounds=[[0.3, 0.7], [0.3, 0.7]],
+                workspace_bounds=[[0.3, 0.7], [0.15, 0.5]],
                 randomize=True
             )
             
@@ -447,7 +450,7 @@ def main():
             continue
         
         print(f"Available objects: {available_objects}")
-        print(f"Enter object number or 'all' to grasp all remaining objects:")
+        print(f"Enter object number, 'all' for all objects, or 'random' for random selection:")
         user_input = input("> ").strip().lower()
         
         # Check for exit
@@ -456,7 +459,12 @@ def main():
             break
         
         # Determine which objects to grasp
-        if user_input == 'all':
+        if user_input == 'random':
+            # Randomly select one object
+            obj_idx = np.random.choice(available_objects)
+            objects_to_grasp = [obj_idx]
+            print(f"Randomly selected: {object_names[obj_idx]}")
+        elif user_input == 'all':
             objects_to_grasp = available_objects
             print(f"Selected: All remaining objects")
         else:
