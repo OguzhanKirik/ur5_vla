@@ -347,12 +347,13 @@ def main():
     robot.load()
     print(f"✓ Robot loaded at {robot.position}")
     
-    # Spawn graspable objects
+    # Spawn graspable objects with randomization
     spawned_ids = objects.spawn_graspable_objects(
         table_height=table_height,
-        workspace_bounds=None
+        workspace_bounds=[[0.3, 0.7], [0.3, 0.7]],
+        randomize=True
     )
-    print(f"✓ Spawned {len(spawned_ids)} objects")
+    print(f"✓ Spawned {len(spawned_ids)} objects with randomized positions")
     
     # Object names for reference
     object_names = ["red box", "green sphere", "blue cylinder", "blue box"]
