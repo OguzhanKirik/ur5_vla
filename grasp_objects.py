@@ -278,12 +278,36 @@ def grasp_and_place_object(robot, controller, camera, target_object_id, containe
     
     print("✓ Pick and place complete!")
     
-    # Return to home position
+    # Return to home position smoothly
     print("\n=== Returning to Home Position ===")
-    robot.reset_to_home()
-    for _ in range(100):
-        p.stepSimulation()
-        time.sleep(1./240.)
+    home_ee_pos = np.array([0.5, 0.4, table_height + 0.3])  # Safe home position above table
+    
+    for step in range(300):
+        current_pos, current_orn = robot.get_end_effector_pose()
+        
+        delta = home_ee_pos - current_pos
+        distance = np.linalg.norm(delta)
+        
+        if distance < 0.02:
+            print(f"✓ Reached home position!")
+            break
+        
+        if distance > 0.001:
+            delta_normalized = delta / distance
+            action_pos = np.clip(delta_normalized * 2.0, -1, 1)  # Moderate speed
+        else:
+            action_pos = np.zeros(3)
+        
+        action = np.concatenate([action_pos, [0, 0, 0], [1]])  # gripper open
+        controller.process_action(action)
+        
+        for _ in range(4):
+            p.stepSimulation()
+            time.sleep(1./240.)
+        
+        if step % 50 == 0:
+            print(f"  Returning... Distance: {distance:.4f}m")
+    
     print("✓ Returned to home\n")
 
 
