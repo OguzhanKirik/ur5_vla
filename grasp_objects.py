@@ -276,7 +276,15 @@ def grasp_and_place_object(robot, controller, camera, target_object_id, containe
         p.stepSimulation()
         time.sleep(1./240.)
     
-    print("✓ Pick and place complete!\n")
+    print("✓ Pick and place complete!")
+    
+    # Return to home position
+    print("\n=== Returning to Home Position ===")
+    robot.reset_to_home()
+    for _ in range(100):
+        p.stepSimulation()
+        time.sleep(1./240.)
+    print("✓ Returned to home\n")
 
 
 def main():
@@ -369,53 +377,101 @@ def main():
         p.stepSimulation()
         time.sleep(1./240.)
     
+    # Track grasped objects
+    grasped_objects = set()
+    
     # Get object positions after settling
     print("\n=== Available Objects ===")
     for i, (obj_id, name) in enumerate(zip(spawned_ids, object_names)):
         pos, _ = p.getBasePositionAndOrientation(obj_id)
         print(f"{i}: {name} at {pos}")
     
-    # Get user selection
-    print("\n=== Object Selection ===")
-    print("Enter object number (0-3) or 'all' to grasp all objects:")
-    user_input = input("> ").strip().lower()
+    # Main interaction loop
+    print("\n=== Starting Interactive Grasping ===")
+    print("Enter 'quit' or 'exit' to stop")
     
-    # Determine which objects to grasp
-    if user_input == 'all':
-        objects_to_grasp = list(range(len(spawned_ids)))
-        print(f"Selected: All objects")
-    else:
-        try:
-            obj_idx = int(user_input)
-            if 0 <= obj_idx < len(spawned_ids):
-                objects_to_grasp = [obj_idx]
-                print(f"Selected: {object_names[obj_idx]}")
-            else:
-                print(f"Invalid selection. Defaulting to object 0 ({object_names[0]})")
-                objects_to_grasp = [0]
-        except ValueError:
-            print(f"Invalid input. Defaulting to object 0 ({object_names[0]})")
-            objects_to_grasp = [0]
-    
-    # Execute grasping for selected objects
-    print(f"\n=== Starting Pick and Place Sequence ===")
-    for obj_idx in objects_to_grasp:
-        print(f"\n{'='*60}")
-        print(f"Grasping object {obj_idx}: {object_names[obj_idx]}")
-        print(f"{'='*60}")
+    while True:
+        # Get user selection
+        print("\n=== Object Selection ===")
+        available_objects = [i for i in range(len(spawned_ids)) if i not in grasped_objects]
+        if not available_objects:
+            print("No objects remaining on table!")
+            print("\n=== Resetting Environment ===")
+            
+            # Clear objects
+            objects.clear_objects()
+            grasped_objects.clear()
+            
+            # Respawn objects with randomized positions
+            spawned_ids = objects.spawn_graspable_objects(
+                table_height=table_height,
+                workspace_bounds=[[0.3, 0.7], [0.3, 0.7]],
+                randomize=True
+            )
+            
+            # Let physics settle
+            for _ in range(100):
+                p.stepSimulation()
+                time.sleep(1./240.)
+            
+            print("✓ Environment reset with new object positions!")
+            print("\n=== Available Objects ===")
+            for i, (obj_id, name) in enumerate(zip(spawned_ids, object_names)):
+                pos, _ = p.getBasePositionAndOrientation(obj_id)
+                print(f"{i}: {name} at {pos}")
+            continue
         
-        grasp_and_place_object(
-            robot=robot,
-            controller=controller,
-            camera=camera,
-            target_object_id=spawned_ids[obj_idx],
-            container_pos=container_pos,
-            table_height=table_height
-        )
-    
-    print(f"\n{'='*60}")
-    print(f"✓ All selected objects processed!")
-    print(f"{'='*60}")
+        print(f"Available objects: {available_objects}")
+        print(f"Enter object number or 'all' to grasp all remaining objects:")
+        user_input = input("> ").strip().lower()
+        
+        # Check for exit
+        if user_input in ['quit', 'exit', 'q']:
+            print("Exiting...")
+            break
+        
+        # Determine which objects to grasp
+        if user_input == 'all':
+            objects_to_grasp = available_objects
+            print(f"Selected: All remaining objects")
+        else:
+            try:
+                obj_idx = int(user_input)
+                if obj_idx in available_objects:
+                    objects_to_grasp = [obj_idx]
+                    print(f"Selected: {object_names[obj_idx]}")
+                elif obj_idx in grasped_objects:
+                    print(f"Object {obj_idx} already grasped!")
+                    continue
+                else:
+                    print(f"Invalid selection. Available: {available_objects}")
+                    continue
+            except ValueError:
+                print(f"Invalid input. Please enter a number or 'all'")
+                continue
+        
+        # Execute grasping for selected objects
+        print(f"\n=== Starting Pick and Place Sequence ===")
+        for obj_idx in objects_to_grasp:
+            print(f"\n{'='*60}")
+            print(f"Grasping object {obj_idx}: {object_names[obj_idx]}")
+            print(f"{'='*60}")
+            
+            grasp_and_place_object(
+                robot=robot,
+                controller=controller,
+                camera=camera,
+                target_object_id=spawned_ids[obj_idx],
+                container_pos=container_pos,
+                table_height=table_height
+            )
+            
+            # Mark as grasped
+            grasped_objects.add(obj_idx)
+        
+        print(f"\n{'='*60}")
+        print(f"✓ All selected objects processed!")
+        print(f"{'='*60}")
     
     # Keep simulation running
     print("\n=== Simulation Running ===")
