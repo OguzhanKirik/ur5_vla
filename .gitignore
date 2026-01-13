@@ -2,6 +2,7 @@
 checkpoints/
 datasets/
 ../datasets
+../scripts/wandb
 /backup
 # Python cache
 __pycache__/
