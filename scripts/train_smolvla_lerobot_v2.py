@@ -47,10 +47,10 @@ def main():
     parser.add_argument("--training-steps", type=int, default=5000, help="Number of training steps")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--chunk-size", type=int, default=50, help="Action chunk size")
-    parser.add_argument("--checkpoint-freq", type=int, default=5000, help="Checkpoint frequency")
+    parser.add_argument("--checkpoint-freq", type=int, default=1000, help="Checkpoint frequency")
     parser.add_argument("--log-freq", type=int, default=10, help="Log frequency")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset to N samples for testing")
-    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    parser.add_argument("--no-resume", action="store_true", help="Start fresh instead of resuming from latest checkpoint")
     
     args = parser.parse_args()
     
@@ -71,16 +71,22 @@ def main():
     # Find latest checkpoint if resuming
     starting_step = 0
     pretrained_path = "lerobot/smolvla_base"
+    optimizer_state_path = None
+    scheduler_state_path = None
     
-    if args.resume:
+    if not args.no_resume:
         checkpoints = list(output_dir.glob("checkpoint-*"))
         if checkpoints:
             latest = max(checkpoints, key=lambda p: int(p.name.split('-')[1]))
             starting_step = int(latest.name.split('-')[1])
             pretrained_path = str(latest)
+            optimizer_state_path = latest / "optimizer.pt"
+            scheduler_state_path = latest / "scheduler.pt"
             print(f"🔄 Resuming from step {starting_step}: {pretrained_path}")
         else:
-            print("⚠️  No checkpoints found, starting fresh")
+            print("ℹ️  No checkpoints found, starting fresh")
+    else:
+        print("Starting fresh training (--no-resume flag set)")
     
     # Load dataset metadata FIRST (this is the key difference!)
     print(f"\nLoading dataset metadata: {args.repo_id}")
@@ -171,6 +177,15 @@ def main():
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
+    # Load optimizer and scheduler states if resuming
+    if optimizer_state_path and optimizer_state_path.exists():
+        print(f"Loading optimizer state from {optimizer_state_path}")
+        optimizer.load_state_dict(torch.load(optimizer_state_path, map_location=device))
+    
+    if scheduler_state_path and scheduler_state_path.exists():
+        print(f"Loading scheduler state from {scheduler_state_path}")
+        scheduler.load_state_dict(torch.load(scheduler_state_path, map_location=device))
+    
     # Print training config
     print("\n" + "="*60)
     print("Training Configuration")
@@ -196,7 +211,7 @@ def main():
             "pretrained_from": pretrained_path,
             "device": str(device),
         },
-        resume="allow" if args.resume else None,
+        resume="allow",
     )
     print("📊 Weights & Biases initialized!\n")
     
@@ -264,6 +279,11 @@ def main():
                 policy.save_pretrained(checkpoint_dir)
                 preprocessor.save_pretrained(checkpoint_dir)
                 postprocessor.save_pretrained(checkpoint_dir)
+                
+                # Save optimizer and scheduler states
+                torch.save(optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
+                torch.save(scheduler.state_dict(), checkpoint_dir / "scheduler.pt")
+                
                 print(f"✅ Checkpoint saved to {checkpoint_dir}\n")
             
             # Clear MPS cache periodically

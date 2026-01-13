@@ -1,0 +1,43 @@
+{
+  "os": "macOS-26.2-arm64-arm-64bit",
+  "python": "CPython 3.10.19",
+  "startedAt": "2026-01-13T11:11:23.596763Z",
+  "args": [
+    "--batch-size",
+    "4",
+    "--training-steps",
+    "5000"
+  ],
+  "program": "/Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts/train_smolvla_lerobot_v2.py",
+  "codePath": "scripts/train_smolvla_lerobot_v2.py",
+  "codePathLocal": "train_smolvla_lerobot_v2.py",
+  "git": {
+    "remote": "https://github.com/OguzhanKirik/ur5_vla.git",
+    "commit": "4267094299f20717a7f8d3e18ac675c57201f2ea"
+  },
+  "email": "kirikoguzhan@gmail.com",
+  "root": "/Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts",
+  "host": "MacBookPro",
+  "executable": "/Users/oguz/miniconda3/envs/lerobot/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 8,
+  "disk": {
+    "/": {
+      "total": "245107195904",
+      "used": "234000580608"
+    }
+  },
+  "memory": {
+    "total": "17179869184"
+  },
+  "apple": {
+    "name": "Apple M1",
+    "ecpuCores": 4,
+    "pcpuCores": 4,
+    "gpuCores": 8,
+    "memoryGb": 16,
+    "swapTotalBytes": "3221225472",
+    "ramTotalBytes": "17179869184"
+  },
+  "writerId": "cy7qd5j2ru3pk628lzzk8ieju6xo3b0a"
+}
