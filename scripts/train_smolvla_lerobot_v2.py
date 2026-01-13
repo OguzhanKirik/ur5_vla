@@ -44,10 +44,10 @@ def main():
     parser.add_argument("--root", type=str, default="../../datasets/lerobot", help="Dataset root directory")
     parser.add_argument("--output-dir", type=str, default="./checkpoints/smolvla_lerobot", help="Output directory")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
-    parser.add_argument("--training-steps", type=int, default=5000, help="Number of training steps")
+    parser.add_argument("--training-steps", type=int, default=15000, help="Number of training steps")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--chunk-size", type=int, default=50, help="Action chunk size")
-    parser.add_argument("--checkpoint-freq", type=int, default=1000, help="Checkpoint frequency")
+    parser.add_argument("--checkpoint-freq", type=int, default=2000, help="Checkpoint frequency")
     parser.add_argument("--log-freq", type=int, default=10, help="Log frequency")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset to N samples for testing")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh instead of resuming from latest checkpoint")
@@ -108,6 +108,32 @@ def main():
     print(f"\nLoading SmolVLA policy from: {pretrained_path}")
     policy = SmolVLAPolicy.from_pretrained(pretrained_path)
     print("Policy loaded successfully!")
+    
+    # UPDATE POLICY CONFIG TO ACCEPT 7D ACTIONS AND 8D STATE
+    # Dataset has 7D actions (6 joints + 1 gripper) but pretrained model expects 6D
+    # Dataset has 8D state (6 joints + 2 gripper values) but pretrained model expects 6D
+    # We need to extend both to match our dataset
+    dataset_action_dim = output_features['action'].shape[0]  # Should be 7
+    dataset_state_dim = input_features['observation.state'].shape[0]  # Should be 8
+    
+    print(f"\nDataset action dim: {dataset_action_dim}, Policy action dim: {policy.config.action_feature.shape[0]}")
+    print(f"Dataset state dim: {dataset_state_dim}, Policy state dim: {policy.config.input_features['observation.state'].shape[0]}")
+    
+    if dataset_action_dim != policy.config.action_feature.shape[0]:
+        print(f"⚠️  Action dimension mismatch! Updating policy config...")
+        # Create new action feature with dataset dimensions
+        new_action_feature = output_features['action']
+        policy.config.action_feature = new_action_feature
+        policy.config.max_action_dim = max(policy.config.max_action_dim, dataset_action_dim)
+        print(f"✓ Updated action feature to shape {new_action_feature.shape}")
+    
+    if dataset_state_dim != policy.config.input_features['observation.state'].shape[0]:
+        print(f"⚠️  State dimension mismatch! Updating policy config...")
+        # Create new state feature with dataset dimensions
+        new_state_feature = input_features['observation.state']
+        policy.config.input_features['observation.state'] = new_state_feature
+        policy.config.max_state_dim = max(policy.config.max_state_dim, dataset_state_dim)
+        print(f"✓ Updated state feature to shape {new_state_feature.shape}")
     
     policy.train()
     policy.to(device)
