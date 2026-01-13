@@ -1,0 +1,67 @@
+_wandb:
+    value:
+        cli_version: 0.21.4
+        e:
+            qpqvjq81jbrb7op8p6fgvl7dl3od5ndj:
+                args:
+                    - --max-samples
+                    - "200"
+                    - --training-steps
+                    - "50"
+                    - --batch-size
+                    - "4"
+                codePath: scripts/train_smolvla_lerobot_v2.py
+                codePathLocal: train_smolvla_lerobot_v2.py
+                email: kirikoguzhan@gmail.com
+                executable: /Users/oguz/miniconda3/envs/lerobot/bin/python
+                git:
+                    commit: 620f4d106bfca0733a21d5e57342db3bf812e18f
+                    remote: https://github.com/OguzhanKirik/ur5_vla.git
+                host: MacBookPro
+                os: macOS-26.2-arm64-arm-64bit
+                program: /Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts/train_smolvla_lerobot_v2.py
+                python: CPython 3.10.19
+                root: /Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts
+                startedAt: "2026-01-13T07:08:35.629127Z"
+                writerId: qpqvjq81jbrb7op8p6fgvl7dl3od5ndj
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 83
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 83
+            "3":
+                - 13
+                - 16
+            "4": 3.10.19
+            "5": 0.21.4
+            "6": 4.57.3
+            "12": 0.21.4
+            "13": darwin-arm64
+batch_size:
+    value: 4
+chunk_size:
+    value: 50
+dataset:
+    value: local/ur5_smolvla_grasp
+device:
+    value: mps
+learning_rate:
+    value: 1e-05
+pretrained_from:
+    value: lerobot/smolvla_base
+training_steps:
+    value: 50

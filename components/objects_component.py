@@ -215,13 +215,14 @@ class ObjectsComponent:
         self.objects.append(obj_id)
         return obj_id
     
-    def spawn_graspable_objects(self, table_height, workspace_bounds=None):
+    def spawn_graspable_objects(self, table_height, workspace_bounds=None, randomize=False):
         """
         Spawn a set of graspable objects on the table.
         
         Args:
             table_height: Z-coordinate of table surface
             workspace_bounds: [[x_min, x_max], [y_min, y_max]] or None for defaults
+            randomize: Whether to randomize object positions within workspace
             
         Returns:
             object_ids: list of spawned object IDs
@@ -237,13 +238,49 @@ class ObjectsComponent:
         self.clear_objects()
         
         # Define object configurations
-        configs = [
-            # (type, params, position, color)
-            ('box', 0.03, [0.5, 0.4, table_height + 0.015], [1, 0, 0, 1]),  # Red cube
-            ('sphere', 0.025, [0.3, 0.3, table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
-            ('cylinder', (0.02, 0.05), [0.7, 0.5, table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
-            ('box', 0.03, [0.6, 0.3, table_height + 0.015], [0, 0, 1, 1]),  # Blue cube
-        ]
+        if randomize:
+            # Randomize positions within workspace with minimum separation
+            positions = []
+            min_distance = 0.15  # Minimum 15cm between objects
+            max_attempts = 50
+            
+            for obj_idx in range(4):  # 4 objects
+                for attempt in range(max_attempts):
+                    x = np.random.uniform(x_min, x_max)
+                    y = np.random.uniform(y_min, y_max)
+                    
+                    # Check distance to all previous objects
+                    valid = True
+                    for prev_pos in positions:
+                        dist = np.sqrt((x - prev_pos[0])**2 + (y - prev_pos[1])**2)
+                        if dist < min_distance:
+                            valid = False
+                            break
+                    
+                    if valid:
+                        positions.append([x, y])
+                        break
+                else:
+                    # If couldn't find valid position after max_attempts, use fallback
+                    print(f"Warning: Could not find valid position for object {obj_idx}, using fallback")
+                    positions.append([np.random.uniform(x_min, x_max), np.random.uniform(y_min, y_max)])
+            
+            # Replace cubes with specified spheres/cylinders:
+            # - Red sphere, Green sphere, Blue cylinder, Red cylinder
+            configs = [
+                ('sphere', 0.025, [positions[0][0], positions[0][1], table_height + 0.025], [1, 0, 0, 1]),  # Red sphere
+                ('sphere', 0.025, [positions[1][0], positions[1][1], table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
+                ('cylinder', (0.02, 0.05), [positions[2][0], positions[2][1], table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
+                ('cylinder', (0.02, 0.05), [positions[3][0], positions[3][1], table_height + 0.025], [1, 0, 0, 1]),  # Red cylinder
+            ]
+        else:
+            # Fixed (non-random) configuration: red sphere, green sphere, blue cylinder, red cylinder
+            configs = [
+                ('sphere', 0.025, [0.5, 0.4, table_height + 0.025], [1, 0, 0, 1]),  # Red sphere
+                ('sphere', 0.025, [0.3, 0.3, table_height + 0.025], [0, 1, 0, 1]),  # Green sphere
+                ('cylinder', (0.02, 0.05), [0.7, 0.5, table_height + 0.025], [0, 0, 1, 1]),  # Blue cylinder
+                ('cylinder', (0.02, 0.05), [0.6, 0.3, table_height + 0.025], [1, 0, 0, 1]),  # Red cylinder
+            ]
         
         spawned_ids = []
         for config in configs:
