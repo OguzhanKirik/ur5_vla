@@ -150,48 +150,18 @@ def load_model(checkpoint_dir, device):
     print(f"  State feature: {policy.config.input_features['observation.state'].shape}")
     
     return policy
-def resize_with_pad(img, width, height, pad_value=-1):
-    """
-    Resize image to fit within (width, height) while maintaining aspect ratio,
-    then pad to exact dimensions.
-    
-    img: torch tensor (B, C, H, W) or (C, H, W)
-    width, height: target dimensions
-    pad_value: value to pad with
-    """
-    # Handle single image (C, H, W)
-    if img.ndim == 3:
-        img = img.unsqueeze(0)
-        squeeze = True
-    else:
-        squeeze = False
-    
-    cur_height, cur_width = img.shape[2:]
-    
-    # Calculate scaling ratio to fit within target size
-    ratio = max(cur_width / width, cur_height / height)
-    resized_height = int(cur_height / ratio)
-    resized_width = int(cur_width / ratio)
-    
-    # Resize while maintaining aspect ratio
-    resized_img = torch.nn.functional.interpolate(
-        img, size=(resized_height, resized_width), mode="bilinear", align_corners=False
-    )
-    
-    # Calculate padding needed
-    pad_height = max(0, int(height - resized_height))
-    pad_width = max(0, int(width - resized_width))
-    
-    # Pad on left and top of image
-    padded_img = torch.nn.functional.pad(resized_img, (pad_width, 0, pad_height, 0), value=pad_value)
-    
-    if squeeze:
-        padded_img = padded_img.squeeze(0)
-    
-    return padded_img
+def images_to_tensors(images: dict) -> dict:
+    """Convert uint8 images to torch tensors in [0, 1] and channel-first."""
+    tensor_images = {}
+    for key, value in images.items():
+        img = torch.from_numpy(value.astype(np.float32)) / 255.0
+        if img.ndim == 3 and img.shape[2] == 3:
+            img = img.permute(2, 0, 1)
+        tensor_images[key] = img
+    return tensor_images
 
 
-def preprocess_obs(obs, policy, device, observation_history):
+def preprocess_obs(obs, policy, observation_history):
     """
     Preprocess observation for the policy.
     Matches exactly what the training preprocessor does.
@@ -199,20 +169,9 @@ def preprocess_obs(obs, policy, device, observation_history):
     obs: dict with keys 'images' (dict of numpy arrays), 'state' (np.array)
     observation_history: deque storing past observations
     """
-    # Convert images to torch tensors WITHOUT normalizing (let preprocessor handle it)
-    # Images come in as uint8 [0, 255] from PyBullet
-    normalized_images = {}
-    for k, v in obs['images'].items():
-        # Convert to tensor as-is (uint8 [0, 255])
-        # Do NOT normalize - let the model's prepare_images handle normalization
-        img = torch.from_numpy(v.astype(np.float32))
-        # Ensure channel-first format (C, H, W)
-        if img.ndim == 3 and img.shape[2] == 3:
-            img = img.permute(2, 0, 1)
-        normalized_images[k] = img
-    
-    # Keep full 8D state (6 joints + 2 gripper values)
-    state = obs['state'].copy()
+    # Match dataset loading: float in [0, 1], channel-first.
+    normalized_images = images_to_tensors(obs["images"])
+    state = obs["state"].copy()
     
     observation_history.append({
         'images': normalized_images,
@@ -227,9 +186,6 @@ def preprocess_obs(obs, policy, device, observation_history):
     image_feature_names = ['observation.images.top', 'observation.images.wrist']
     image_keys = ['top', 'wrist']
     
-    # Get target image size from policy config
-    target_width, target_height = policy.config.resize_imgs_with_padding  # (512, 512)
-    
     # Handle images - stack from history using dataset names
     for img_key, feat_name in zip(image_keys, image_feature_names):
         img_stack = []
@@ -243,12 +199,7 @@ def preprocess_obs(obs, policy, device, observation_history):
         
         # Stack: (n_obs_steps, C, H, W)
         img_tensor = torch.stack(img_stack)
-        
-        # Resize with padding to match training format (512x512)
-        # Images are still in [0, 255] range at this point
-        img_tensor = resize_with_pad(img_tensor, target_width, target_height, pad_value=0)
-        
-        batch[feat_name] = img_tensor.unsqueeze(0).to(device)  # Add batch dim
+        batch[feat_name] = img_tensor.unsqueeze(0)
     
     # Handle state - keep full 8D and stack from history
     state_stack = []
@@ -259,14 +210,14 @@ def preprocess_obs(obs, policy, device, observation_history):
         state_stack.insert(0, state_stack[0])
     
     state_tensor = torch.stack(state_stack)
-    batch['observation.state'] = state_tensor.unsqueeze(0).to(device)  # Add batch dim
+    batch['observation.state'] = state_tensor.unsqueeze(0)
     
     return batch
 
 
 
-def run_episode(robot, controller, camera, objects, table_height, policy, device, 
-                episode_id, preprocessor, max_steps=500):
+def run_episode(robot, controller, camera, objects, table_height, policy, device,
+                episode_id, preprocessor, postprocessor, max_steps=500):
     """Run a single evaluation episode."""
     
     # Reset robot to home position
@@ -321,12 +272,7 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
     # Fill history with the same initial observation multiple times
     # This gives the model temporal context about the starting state
     for _ in range(policy.config.n_obs_steps):
-        normalized_images = {}
-        for k, v in initial_images.items():
-            img = torch.from_numpy(v.astype(np.float32) / 255.0)
-            if img.ndim == 3 and img.shape[2] == 3:
-                img = img.permute(2, 0, 1)
-            normalized_images[k] = img
+        normalized_images = images_to_tensors(initial_images)
         
         observation_history.append({
             'images': normalized_images,
@@ -335,23 +281,22 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
     
     print(f"Observation history pre-filled with {len(observation_history)} frames")
     
+    # Print current state for debugging
+    print(f"Initial robot state: {initial_state}")
+    print(f"  Joints: {initial_state[:6]}")
+    print(f"  Gripper: {initial_state[6:]}") 
+    
     episode_success = False
     
     # Collect initial observations to build up observation history (2 steps)
-    print("Collecting initial observations...")
+    print("\nCollecting initial observations...")
     for obs_step in range(2):
         state = get_robot_state(robot)
         images = capture_images(camera)
         obs = {'state': state, 'images': images}
         
         # Preprocess and add to history
-        import torch.nn.functional as F
-        normalized_images = {}
-        for k, v in obs['images'].items():
-            img = torch.from_numpy(v.astype(np.float32) / 255.0)
-            if img.ndim == 3 and img.shape[2] == 3:
-                img = img.permute(2, 0, 1)
-            normalized_images[k] = img
+        normalized_images = images_to_tensors(obs["images"])
         
         observation_history.append({
             'images': normalized_images,
@@ -361,6 +306,21 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
         sim_step(4)
     
     print(f"Observation history built with {len(observation_history)} frames")
+    
+    # DEBUG: Save first observation images to verify they're correct
+    if episode_id == 0:
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        axes[0].imshow(initial_images['top'])
+        axes[0].set_title('Top Camera View')
+        axes[0].axis('off')
+        axes[1].imshow(initial_images['wrist'])
+        axes[1].set_title('Wrist Camera View')
+        axes[1].axis('off')
+        plt.tight_layout()
+        plt.savefig('debug_first_observation.png', dpi=150, bbox_inches='tight')
+        print(f"✓ Saved first observation to debug_first_observation.png\n")
+    
     print("Starting robot control...\n")
     
     for step in range(max_steps):
@@ -370,41 +330,67 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
         obs = {'state': state, 'images': images}
         
         # Preprocess observation and create batch with correct feature names
-        batch = preprocess_obs(obs, policy, device, observation_history)
-        
-        # Rename images from dataset names (top/wrist) to policy names (camera1/2/3)
-        # This is necessary because the dataset uses environment-specific camera names,
-        # but the policy expects generic camera indices
-        if 'observation.images.top' in batch:
-            batch['observation.images.camera1'] = batch.pop('observation.images.top')
-        if 'observation.images.wrist' in batch:
-            batch['observation.images.camera2'] = batch.pop('observation.images.wrist')
-        
-        # Add empty camera3 (policy expects all 3 cameras, we only have 2)
-        if 'observation.images.camera1' in batch:
-            batch['observation.images.camera3'] = torch.zeros_like(batch['observation.images.camera1'])
+        batch = preprocess_obs(obs, policy, observation_history)
         
         # Apply preprocessor pipeline to prepare data for model:
         # 1. RenameObservationsProcessorStep - leaves names as-is (rename_map is empty)
         # 2. AddBatchDimensionProcessorStep - ensures batch dimension exists
         # 3. SmolVLANewLineProcessor - formats task instructions for tokenizer
         # 4. TokenizerProcessorStep - tokenizes language instructions
-        # 5. DeviceProcessorStep - moves tensors to model device (GPU/MPS)
-        # 6. NormalizerProcessorStep - applies IDENTITY normalization for VISUAL (keeps [0,255]),
+        # 5. DeviceProcessorStep - moves tensors to policy.config.device
+        # 6. NormalizerProcessorStep - applies IDENTITY normalization for VISUAL (keeps [0,1]),
         #                              and MEAN_STD normalization for STATE/ACTION
         batch['task'] = [task_instruction]
         batch = preprocessor(batch)
+        
+        # Rename images from dataset names (top/wrist) to policy names (camera1/2)
+        # This matches the training loop behavior.
+        if 'observation.images.top' in batch:
+            batch['observation.images.camera1'] = batch.pop('observation.images.top')
+        if 'observation.images.wrist' in batch:
+            batch['observation.images.camera2'] = batch.pop('observation.images.wrist')
+        if 'observation.images.top_is_pad' in batch:
+            batch['observation.images.camera1_is_pad'] = batch.pop('observation.images.top_is_pad')
+        if 'observation.images.wrist_is_pad' in batch:
+            batch['observation.images.camera2_is_pad'] = batch.pop('observation.images.wrist_is_pad')
+        
+        # Move batch to runtime device (mirrors training)
+        batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         
         # Get single action from policy
         # Policy's select_action() manages action queue internally!
         # It calls _get_action_chunk() only when queue is empty,
         # stores the chunk internally, and returns one action at a time
         action = policy.select_action(batch)
+        
+        # CRITICAL: DO use postprocessor to denormalize actions!
+        # Model outputs normalized actions in [-1, 1]
+        # Postprocessor denormalizes them to actual joint space using dataset stats
+        action = postprocessor(action)
+        
         action = action.cpu().numpy() if hasattr(action, 'cpu') else action
         action = action.squeeze()  # Remove singleton dimensions
         
-        # Clip action to valid range
-        action = np.clip(action, -1.0, 1.0)
+        # DEBUG: Print first action and batch info
+        if step == 0:
+            print(f"\n🔍 First action (denormalized): {action}")
+            print(f"   Action shape: {action.shape}")
+            print(f"   Action range: [{action.min():.4f}, {action.max():.4f}]")
+            print(f"   Expected: denormalized joint angles/deltas")
+            print(f"\n📷 Image inputs:")
+            if 'observation.images.camera1' in batch:
+                img1 = batch['observation.images.camera1']
+                print(f"   camera1 shape: {img1.shape}, range: [{img1.min():.3f}, {img1.max():.3f}]")
+            if 'observation.images.camera2' in batch:
+                img2 = batch['observation.images.camera2']
+                print(f"   camera2 shape: {img2.shape}, range: [{img2.min():.3f}, {img2.max():.3f}]")
+            print(f"\n📝 Task: {task_instruction}")
+            print(f"   Batch keys: {list(batch.keys())}")
+            if 'input_ids' in batch:
+                print(f"   Tokenized task length: {batch['input_ids'].shape if hasattr(batch['input_ids'], 'shape') else len(batch['input_ids'])} tokens")
+            else:
+                print(f"   ⚠️ WARNING: No 'input_ids' in batch! Task not tokenized!")
+            print()
         
         # Handle action dimensions - model may output 6 or 7 dims
         if len(action) == 6:
@@ -414,9 +400,14 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
             # Pad to 7 if needed
             action = np.concatenate([action, np.zeros(7 - len(action))])
         
+        # Clip joint angles to safe range (denormalized actions in radians)
+        # Most UR5 joints: -2π to 2π
+        action[:6] = np.clip(action[:6], -6.28, 6.28)
+        action[6] = np.clip(action[6], -1.0, 1.0)  # Gripper: [-1, 1]
+        
         # DEBUG: Print action every 50 steps
         if step % 50 == 0:
-            print(f"  Step {step:3d}: action={action[:6]} | gripper={action[6]:.2f}")
+            print(f"  Step {step:3d}: joints={action[:6]} | gripper={action[6]:.2f}")
         
         # Execute action
         controller.process_action(action[:7])  # Use first 7 elements
@@ -458,7 +449,7 @@ def main():
                         help="Path to checkpoint directory")
     parser.add_argument("--repo-id", type=str, default="local/ur5_smolvla_grasp",
                         help="Dataset repo ID (for metadata/stats)")
-    parser.add_argument("--root", type=str, default="../../datasets/lerobot",
+    parser.add_argument("--root", type=str, default="../../datasets_/lerobot",
                         help="Dataset root directory")
     parser.add_argument("--num-episodes", type=int, default=1,
                         help="Number of evaluation episodes")
@@ -554,7 +545,7 @@ def main():
         for episode_id in range(args.num_episodes):
             result = run_episode(
                 robot, controller, camera, objects, table_height,
-                policy, device, episode_id, preprocessor,
+                policy, device, episode_id, preprocessor, postprocessor,
                 max_steps=args.max_steps
             )
             results.append(result)

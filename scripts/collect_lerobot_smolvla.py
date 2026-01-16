@@ -12,9 +12,14 @@ Usage:
     python collect_lerobot_smolvla.py --episodes 100 --repo-id local/ur5_smolvla_grasp
 """
 
+import sys
+from pathlib import Path
+
+# Add parent directory to path to import components
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import numpy as np
 import argparse
-from pathlib import Path
 from tqdm import tqdm
 import pybullet as p
 import pybullet_data
@@ -395,7 +400,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
 
 def main():
     parser = argparse.ArgumentParser(description="Collect LeRobot-compatible SmolVLA dataset")
-    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes")
+    parser.add_argument("--episodes", type=int, default=500, help="Number of episodes")
     parser.add_argument("--repo-id", type=str, default="local/ur5_smolvla_grasp", help="Dataset repo ID")
     parser.add_argument("--root", type=str, default="./datasets/lerobot", help="Root directory for dataset")
     parser.add_argument("--gui", action="store_true", help="Show PyBullet GUI")

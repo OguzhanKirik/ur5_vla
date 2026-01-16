@@ -1,0 +1,89 @@
+_wandb:
+    value:
+        cli_version: 0.21.4
+        e:
+            xhtqfu82ytxpn3tgwv7tb4ibc4ctp4im:
+                apple:
+                    ecpuCores: 4
+                    gpuCores: 8
+                    memoryGb: 16
+                    name: Apple M1
+                    pcpuCores: 4
+                    ramTotalBytes: "17179869184"
+                    swapTotalBytes: "3758096384"
+                args:
+                    - --pretrained-model
+                    - lerobot/smolvla
+                    - --output-dir
+                    - ./checkpoints/smolvla_expert
+                    - --train-expert-only
+                    - --no-resume
+                    - --batch-size
+                    - "4"
+                    - --checkpoint-freq
+                    - "10"
+                    - --training-steps
+                    - "50000"
+                codePath: scripts/train_smolvla_lerobot_v2.py
+                codePathLocal: train_smolvla_lerobot_v2.py
+                cpu_count: 8
+                cpu_count_logical: 8
+                disk:
+                    /:
+                        total: "245107195904"
+                        used: "231748157440"
+                email: kirikoguzhan@gmail.com
+                executable: /Users/oguz/miniconda3/envs/lerobot/bin/python
+                git:
+                    commit: b6169893eb58cb65a4a0eedc405623c0685906d3
+                    remote: https://github.com/OguzhanKirik/ur5_vla.git
+                host: MacBookPro
+                memory:
+                    total: "17179869184"
+                os: macOS-26.2-arm64-arm-64bit
+                program: /Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts/train_smolvla_lerobot_v2.py
+                python: CPython 3.10.19
+                root: /Users/oguz/Desktop/workspace_py/ur5_grasp/ur5_grasp/scripts
+                startedAt: "2026-01-15T19:02:26.153576Z"
+                writerId: xhtqfu82ytxpn3tgwv7tb4ibc4ctp4im
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 83
+            "2":
+                - 1
+                - 11
+                - 41
+                - 49
+                - 51
+                - 71
+                - 83
+            "3":
+                - 13
+                - 16
+            "4": 3.10.19
+            "5": 0.21.4
+            "6": 4.57.3
+            "12": 0.21.4
+            "13": darwin-arm64
+batch_size:
+    value: 4
+chunk_size:
+    value: 50
+dataset:
+    value: local/ur5_smolvla_grasp
+device:
+    value: mps
+learning_rate:
+    value: 1e-05
+pretrained_from:
+    value: lerobot/smolvla
+training_steps:
+    value: 50000

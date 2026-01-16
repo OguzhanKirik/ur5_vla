@@ -19,6 +19,7 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Fix OpenMP duplicate library erro
 
 import argparse
 from pathlib import Path
+import time
 
 import logging
 import warnings
@@ -26,6 +27,8 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("lerobot").setLevel(logging.WARNING)
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import wandb
@@ -41,22 +44,28 @@ from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 def main():
     parser = argparse.ArgumentParser(description="Train SmolVLA on LeRobot dataset")
     parser.add_argument("--repo-id", type=str, default="local/ur5_smolvla_grasp", help="Dataset repo ID")
-    parser.add_argument("--root", type=str, default="../../datasets/lerobot", help="Dataset root directory")
+    parser.add_argument("--root", type=str, default="./datasets/lerobot", help="Dataset root directory")
     parser.add_argument("--output-dir", type=str, default="./checkpoints/smolvla_lerobot", help="Output directory")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
-    parser.add_argument("--training-steps", type=int, default=15000, help="Number of training steps")
+    parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
     parser.add_argument("--chunk-size", type=int, default=50, help="Action chunk size")
-    parser.add_argument("--checkpoint-freq", type=int, default=2000, help="Checkpoint frequency")
+    parser.add_argument("--checkpoint-freq", type=int, default=1000, help="Checkpoint frequency")
     parser.add_argument("--log-freq", type=int, default=10, help="Log frequency")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset to N samples for testing")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh instead of resuming from latest checkpoint")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Validate dataset shapes and camera names, then exit")
+    parser.add_argument("--pretrained-model", type=str, default="lerobot/smolvla",
+                        help="Pretrained model to start from (default: lerobot/smolvla)")
     
     args = parser.parse_args()
     
     # Setup device
     if torch.backends.mps.is_available():
         device = torch.device("mps")
+        # Set memory management for MPS to avoid crashes
+        os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
     elif torch.cuda.is_available():
         device = torch.device("cuda")
     else:
@@ -70,7 +79,7 @@ def main():
     
     # Find latest checkpoint if resuming
     starting_step = 0
-    pretrained_path = "lerobot/smolvla_base"
+    pretrained_path = args.pretrained_model  # Use specified pretrained model
     optimizer_state_path = None
     scheduler_state_path = None
     
@@ -104,10 +113,34 @@ def main():
     for key, feature in output_features.items():
         print(f"  {key}: {feature.shape}")
     
+    # Rename camera keys for policy config (but keep original for dataset loading)
+    policy_input_features = dict(input_features)
+    if "observation.images.top" in policy_input_features:
+        policy_input_features["observation.images.camera1"] = policy_input_features.pop("observation.images.top")
+    if "observation.images.wrist" in policy_input_features:
+        policy_input_features["observation.images.camera2"] = policy_input_features.pop("observation.images.wrist")
+    
     # Load SmolVLA policy
     print(f"\nLoading SmolVLA policy from: {pretrained_path}")
-    policy = SmolVLAPolicy.from_pretrained(pretrained_path)
-    print("Policy loaded successfully!")
+    load_start = time.time()
+    
+    # Create config if starting fresh, otherwise load from checkpoint
+    if starting_step == 0:
+        print("Creating SmolVLA config from scratch...")
+        config = SmolVLAConfig(
+            input_features=policy_input_features,
+            output_features=output_features,
+            chunk_size=args.chunk_size,
+            n_obs_steps=1,
+        )
+        policy = SmolVLAPolicy(config)
+        print(f"Policy created - training all parameters")
+    else:
+        policy = SmolVLAPolicy.from_pretrained(pretrained_path)
+        print(f"Policy loaded from checkpoint")
+    
+    load_time = time.time() - load_start
+    print(f"Policy ready in {load_time:.2f}s")
     
     # UPDATE POLICY CONFIG TO ACCEPT 7D ACTIONS AND 8D STATE
     # Dataset has 7D actions (6 joints + 1 gripper) but pretrained model expects 6D
@@ -121,9 +154,9 @@ def main():
     
     if dataset_action_dim != policy.config.action_feature.shape[0]:
         print(f"⚠️  Action dimension mismatch! Updating policy config...")
-        # Create new action feature with dataset dimensions
+        # Update output_features so the config is saved correctly.
         new_action_feature = output_features['action']
-        policy.config.action_feature = new_action_feature
+        policy.config.output_features['action'] = new_action_feature
         policy.config.max_action_dim = max(policy.config.max_action_dim, dataset_action_dim)
         print(f"✓ Updated action feature to shape {new_action_feature.shape}")
     
@@ -135,6 +168,7 @@ def main():
         policy.config.max_state_dim = max(policy.config.max_state_dim, dataset_state_dim)
         print(f"✓ Updated state feature to shape {new_state_feature.shape}")
     
+    # Ensure model is in training mode
     policy.train()
     policy.to(device)
     
@@ -174,15 +208,95 @@ def main():
         print(f"⚠️  Limiting to first {max_samples} samples for testing")
         dataset = torch.utils.data.Subset(dataset, range(max_samples))
     
-    # Create dataloader
+    # Create dataloader with optimized settings
+    drop_last = len(dataset) >= args.batch_size
+    # MPS has issues with multiprocessing - use 0 workers to avoid crashes
+    # CUDA/CPU can use multiple workers for better performance
+    if device.type == "mps":
+        num_workers = 0
+        print("⚠️  Using num_workers=0 on MPS to avoid multiprocessing crashes")
+    else:
+        num_workers = 4
+    
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        num_workers=0 if device.type == "mps" else 4,
+        num_workers=num_workers,
         batch_size=args.batch_size,
         shuffle=True,
         pin_memory=device.type == "cuda",
-        drop_last=True,
+        drop_last=drop_last,
+        prefetch_factor=2 if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,  # Keep workers alive
     )
+    print(f"DataLoader: {num_workers} workers, batch_size={args.batch_size}")
+    
+    if args.validate_only:
+        batch = next(iter(dataloader))
+        errors = []
+        
+        # Raw dataset checks
+        expected_cameras = ["observation.images.top", "observation.images.wrist"]
+        for cam_key in expected_cameras:
+            if cam_key not in batch:
+                errors.append(f"Missing camera key: {cam_key}")
+            else:
+                img = batch[cam_key]
+                if not torch.is_floating_point(img):
+                    errors.append(f"{cam_key} is not float (dtype={img.dtype})")
+                else:
+                    img_min = img.min().item()
+                    img_max = img.max().item()
+                    if img_min < -1e-3 or img_max > 1.0 + 1e-3:
+                        errors.append(f"{cam_key} out of range [0,1]: min={img_min:.3f}, max={img_max:.3f}")
+                if img.shape[-3] != 3:
+                    errors.append(f"{cam_key} channel dim != 3 (shape={tuple(img.shape)})")
+        
+        if "observation.state" not in batch:
+            errors.append("Missing observation.state")
+        elif batch["observation.state"].shape[-1] != dataset_state_dim:
+            errors.append(
+                f"observation.state dim mismatch: {batch['observation.state'].shape[-1]} vs {dataset_state_dim}"
+            )
+        
+        if "action" not in batch:
+            errors.append("Missing action")
+        elif batch["action"].shape[-1] != dataset_action_dim:
+            errors.append(f"action dim mismatch: {batch['action'].shape[-1]} vs {dataset_action_dim}")
+        
+        # Rename to policy camera keys (matches training)
+        batch = preprocessor(batch)
+        if "observation.images.top" in batch:
+            batch["observation.images.camera1"] = batch.pop("observation.images.top")
+        if "observation.images.wrist" in batch:
+            batch["observation.images.camera2"] = batch.pop("observation.images.wrist")
+        if "observation.images.top_is_pad" in batch:
+            batch["observation.images.camera1_is_pad"] = batch.pop("observation.images.top_is_pad")
+        if "observation.images.wrist_is_pad" in batch:
+            batch["observation.images.camera2_is_pad"] = batch.pop("observation.images.wrist_is_pad")
+        
+        if "observation.images.camera1" not in batch:
+            errors.append("Missing observation.images.camera1 after rename")
+        if "observation.images.camera2" not in batch:
+            errors.append("Missing observation.images.camera2 after rename")
+        
+        print("\nValidation summary")
+        print(f"  action dim: {dataset_action_dim}")
+        print(f"  state dim: {dataset_state_dim}")
+        if "observation.images.camera1" in batch:
+            img = batch["observation.images.camera1"]
+            print(f"  camera1: dtype={img.dtype}, shape={tuple(img.shape)}")
+        if "observation.images.camera2" in batch:
+            img = batch["observation.images.camera2"]
+            print(f"  camera2: dtype={img.dtype}, shape={tuple(img.shape)}")
+        
+        if errors:
+            print("\nValidation failed:")
+            for err in errors:
+                print(f"  - {err}")
+            raise SystemExit(1)
+        
+        print("\nValidation OK")
+        return
     
     # Setup optimizer
     optimizer = torch.optim.AdamW(
@@ -193,24 +307,66 @@ def main():
     )
     
     # Learning rate scheduler with warmup
-    warmup_steps = 500 if starting_step == 0 else 0
+    # Fixed: use constant warmup_steps value, not conditional on starting_step
+    base_warmup_steps = 500
     
     def lr_lambda(current_step):
         actual_step = starting_step + current_step
-        if warmup_steps > 0 and actual_step < warmup_steps:
-            return float(actual_step) / float(max(1, warmup_steps))
-        return max(0.1, 1.0 - (actual_step - warmup_steps) / (args.training_steps - warmup_steps))
+        if actual_step < base_warmup_steps:
+            return float(actual_step) / float(max(1, base_warmup_steps))
+        return max(0.1, 1.0 - (actual_step - base_warmup_steps) / (args.training_steps - base_warmup_steps))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # IMPORTANT: Print the learning rate to verify it's correct when resuming
+    current_lr = optimizer.param_groups[0]['lr']
+    print(f"Initial learning rate: {current_lr:.2e}")
     
     # Load optimizer and scheduler states if resuming
     if optimizer_state_path and optimizer_state_path.exists():
         print(f"Loading optimizer state from {optimizer_state_path}")
-        optimizer.load_state_dict(torch.load(optimizer_state_path, map_location=device))
+        try:
+            optimizer_state = torch.load(optimizer_state_path, map_location=device)
+            optimizer.load_state_dict(optimizer_state)
+        except ValueError as exc:
+            print(f"⚠️  Skipping optimizer state (mismatch): {exc}")
+            try:
+                loaded_groups = optimizer_state.get("param_groups", [])
+                current_groups = optimizer.param_groups
+                print(f"    loaded param_groups: {len(loaded_groups)} | current: {len(current_groups)}")
+                if loaded_groups:
+                    print(f"    loaded group0 params: {len(loaded_groups[0].get('params', []))}")
+                if current_groups:
+                    print(f"    current group0 params: {len(current_groups[0].get('params', []))}")
+                trainable_tensors = [p for p in policy.parameters() if p.requires_grad]
+                trainable_elems = sum(p.numel() for p in trainable_tensors)
+                print(f"    trainable param tensors: {len(trainable_tensors)} | elements: {trainable_elems}")
+                for name, module in policy.named_children():
+                    mod_trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                    if mod_trainable > 0:
+                        print(f"    trainable elements in policy.{name}: {mod_trainable}")
+                if hasattr(policy, "model"):
+                    model = policy.model
+                    model_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                    print(f"    trainable elements in policy.model: {model_trainable}")
+                    if hasattr(model, "vlm_with_expert"):
+                        vlm = model.vlm_with_expert
+                        vlm_trainable = sum(p.numel() for p in vlm.parameters() if p.requires_grad)
+                        print(f"    trainable elements in policy.model.vlm_with_expert: {vlm_trainable}")
+            except Exception as debug_exc:
+                print(f"    (debug) Could not inspect optimizer state: {debug_exc}")
+            optimizer_state_path = None
+        except Exception as exc:
+            print(f"⚠️  Skipping optimizer state (load failed): {exc}")
+            optimizer_state_path = None
     
     if scheduler_state_path and scheduler_state_path.exists():
         print(f"Loading scheduler state from {scheduler_state_path}")
-        scheduler.load_state_dict(torch.load(scheduler_state_path, map_location=device))
+        try:
+            scheduler.load_state_dict(torch.load(scheduler_state_path, map_location=device))
+        except ValueError as exc:
+            print(f"⚠️  Skipping scheduler state (mismatch): {exc}")
+            scheduler_state_path = None
     
     # Print training config
     print("\n" + "="*60)
@@ -247,8 +403,13 @@ def main():
     done = False
     running_loss = 0.0
     
+    # Track timing for diagnostics
+    batch_times = []
+    first_batches = 10
+    
     while not done:
         for batch in dataloader:
+            batch_start = time.time()
             # Use the preprocessor (handles all image/text processing efficiently!)
             batch = preprocessor(batch)
             
@@ -275,10 +436,19 @@ def main():
             torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
             
             optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
             scheduler.step()
             
             running_loss += loss.item()
+            
+            # Track batch timing for first batches
+            if len(batch_times) < first_batches:
+                batch_time = time.time() - batch_start
+                batch_times.append(batch_time)
+                if len(batch_times) == first_batches:
+                    avg_time = sum(batch_times) / len(batch_times)
+                    print(f"\n⏱️  Avg time/batch (first {first_batches}): {avg_time:.3f}s")
+                    print(f"   Est. time per {args.checkpoint_freq} steps: {avg_time * args.checkpoint_freq / 60:.1f}min\n")
             
             # Log progress
             if step % args.log_freq == 0:
@@ -312,8 +482,8 @@ def main():
                 
                 print(f"✅ Checkpoint saved to {checkpoint_dir}\n")
             
-            # Clear MPS cache periodically
-            if device.type == "mps" and step % 100 == 0:
+            # Clear MPS cache periodically (not too often to avoid slowdown)
+            if device.type == "mps" and step % 500 == 0:
                 torch.mps.empty_cache()
             
             if step >= args.training_steps:
