@@ -33,6 +33,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import torch
 import wandb
 
+# Import augmentation utilities
+try:
+    from augmentation_utils import get_augmentation_pipeline, apply_augmentations
+    AUGMENTATION_AVAILABLE = True
+except ImportError:
+    AUGMENTATION_AVAILABLE = False
+    print("⚠️  augmentation_utils.py not found - augmentation disabled")
+
 from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.utils import dataset_to_policy_features
@@ -45,19 +53,26 @@ def main():
     parser = argparse.ArgumentParser(description="Train SmolVLA on LeRobot dataset")
     parser.add_argument("--repo-id", type=str, default="local/ur5_smolvla_grasp", help="Dataset repo ID")
     parser.add_argument("--root", type=str, default="./datasets/lerobot", help="Dataset root directory")
-    parser.add_argument("--output-dir", type=str, default="./checkpoints/smolvla_lerobot", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="./checkpoints/smolvla_full", help="Output directory")
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
-    parser.add_argument("--training-steps", type=int, default=50000, help="Number of training steps")
+    parser.add_argument("--training-steps", type=int, default=60000, help="Number of training steps")
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate")
-    parser.add_argument("--chunk-size", type=int, default=50, help="Action chunk size")
-    parser.add_argument("--checkpoint-freq", type=int, default=1000, help="Checkpoint frequency")
+    parser.add_argument("--chunk-size", type=int, default=10, help="Action chunk size")
+    parser.add_argument("--checkpoint-freq", type=int, default=5000, help="Checkpoint frequency")
     parser.add_argument("--log-freq", type=int, default=10, help="Log frequency")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset to N samples for testing")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh instead of resuming from latest checkpoint")
     parser.add_argument("--validate-only", action="store_true",
                         help="Validate dataset shapes and camera names, then exit")
-    parser.add_argument("--pretrained-model", type=str, default="lerobot/smolvla",
-                        help="Pretrained model to start from (default: lerobot/smolvla)")
+    parser.add_argument("--pretrained-model", type=str, default="lerobot/smolvla_base",
+                        help="Pretrained model to start from (default: lerobot/smolvla_base)")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1,
+                        help="Number of steps to accumulate gradients before updating (effective batch size = batch_size * this)")
+    parser.add_argument("--use-augmentation", action="store_true",
+                        help="Enable data augmentation (color jitter, crop, noise)")
+    parser.add_argument("--augmentation-strength", type=str, default="conservative", 
+                        choices=["minimal", "conservative", "aggressive"],
+                        help="Augmentation strength: minimal (sim-to-sim), conservative (sim-to-real), or aggressive")
     
     args = parser.parse_args()
     
@@ -76,6 +91,16 @@ def main():
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # If root is wrong relative to cwd, fall back to the script-local dataset.
+    root_path = Path(args.root)
+    if not (root_path / "meta" / "info.json").exists():
+        alt_root = Path(__file__).resolve().parent / "datasets" / "lerobot"
+        if (alt_root / "meta" / "info.json").exists():
+            print(f"⚠️  Dataset root not found at {root_path}; using {alt_root}")
+            args.root = str(alt_root)
+        else:
+            print(f"⚠️  Dataset root not found at {root_path}; expected meta/info.json")
     
     # Find latest checkpoint if resuming
     starting_step = 0
@@ -124,49 +149,48 @@ def main():
     print(f"\nLoading SmolVLA policy from: {pretrained_path}")
     load_start = time.time()
     
-    # Create config if starting fresh, otherwise load from checkpoint
-    if starting_step == 0:
-        print("Creating SmolVLA config from scratch...")
-        config = SmolVLAConfig(
-            input_features=policy_input_features,
-            output_features=output_features,
-            chunk_size=args.chunk_size,
-            n_obs_steps=1,
-        )
-        policy = SmolVLAPolicy(config)
-        print(f"Policy created - training all parameters")
-    else:
-        policy = SmolVLAPolicy.from_pretrained(pretrained_path)
-        print(f"Policy loaded from checkpoint")
-    
+    # Load pretrained model for ALL cases (fresh or resume).
+    # CRITICAL: Using SmolVLAPolicy(config) from scratch leaves VLM with random weights
+    # when load_vlm_weights=False (the default). from_pretrained loads real weights.
+    print(f"Loading SmolVLA policy via from_pretrained: {pretrained_path}")
+    policy = SmolVLAPolicy.from_pretrained(pretrained_path)
+    print(f"Policy loaded from: {pretrained_path}")
+
+    # Override chunk_size and n_action_steps from args
+    policy.config.chunk_size = args.chunk_size
+    policy.config.n_action_steps = args.chunk_size  # match chunk_size
+
     load_time = time.time() - load_start
     print(f"Policy ready in {load_time:.2f}s")
-    
+
+    # Remove camera3 from pretrained config if present (our dataset only has 2 cameras)
+    if "observation.images.camera3" in policy.config.input_features:
+        del policy.config.input_features["observation.images.camera3"]
+        print("Removed observation.images.camera3 from config (dataset has 2 cameras)")
+
     # UPDATE POLICY CONFIG TO ACCEPT 7D ACTIONS AND 8D STATE
     # Dataset has 7D actions (6 joints + 1 gripper) but pretrained model expects 6D
     # Dataset has 8D state (6 joints + 2 gripper values) but pretrained model expects 6D
     # We need to extend both to match our dataset
     dataset_action_dim = output_features['action'].shape[0]  # Should be 7
     dataset_state_dim = input_features['observation.state'].shape[0]  # Should be 8
-    
+
     print(f"\nDataset action dim: {dataset_action_dim}, Policy action dim: {policy.config.action_feature.shape[0]}")
     print(f"Dataset state dim: {dataset_state_dim}, Policy state dim: {policy.config.input_features['observation.state'].shape[0]}")
-    
+
     if dataset_action_dim != policy.config.action_feature.shape[0]:
-        print(f"⚠️  Action dimension mismatch! Updating policy config...")
-        # Update output_features so the config is saved correctly.
+        print(f"Action dimension mismatch - updating policy config...")
         new_action_feature = output_features['action']
         policy.config.output_features['action'] = new_action_feature
         policy.config.max_action_dim = max(policy.config.max_action_dim, dataset_action_dim)
-        print(f"✓ Updated action feature to shape {new_action_feature.shape}")
-    
+        print(f"Updated action feature to shape {new_action_feature.shape}")
+
     if dataset_state_dim != policy.config.input_features['observation.state'].shape[0]:
-        print(f"⚠️  State dimension mismatch! Updating policy config...")
-        # Create new state feature with dataset dimensions
+        print(f"State dimension mismatch - updating policy config...")
         new_state_feature = input_features['observation.state']
         policy.config.input_features['observation.state'] = new_state_feature
         policy.config.max_state_dim = max(policy.config.max_state_dim, dataset_state_dim)
-        print(f"✓ Updated state feature to shape {new_state_feature.shape}")
+        print(f"Updated state feature to shape {new_state_feature.shape}")
     
     # Ensure model is in training mode
     policy.train()
@@ -298,23 +322,45 @@ def main():
         print("\nValidation OK")
         return
     
-    # Setup optimizer
+    # If LR is explicitly overridden, reset LR schedule offset to avoid immediate decay.
+    lr_overridden = "--lr" in sys.argv
+    if lr_overridden:
+        print("⚠️  --lr provided; resetting LR schedule offset to 0")
+
+    # Setup optimizer — match pretrained SmolVLA config:
+    # weight_decay=1e-10, betas=(0.9, 0.95), grad_clip=10.0
+    # Separate into decay / no-decay groups (exclude bias & norm layers)
+    decay_params = []
+    no_decay_params = []
+    for name, param in policy.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or name.endswith(".bias"):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
     optimizer = torch.optim.AdamW(
-        [p for p in policy.parameters() if p.requires_grad],
+        [
+            {"params": decay_params, "weight_decay": 1e-10},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
         lr=args.lr,
-        weight_decay=0.01,
-        betas=(0.9, 0.999)
+        betas=(0.9, 0.95),
     )
     
     # Learning rate scheduler with warmup
-    # Fixed: use constant warmup_steps value, not conditional on starting_step
+    # If resuming past warmup, skip warmup entirely.
     base_warmup_steps = 500
-    
+    warmup_steps = 0 if lr_overridden or starting_step >= base_warmup_steps else base_warmup_steps
+
+    lr_schedule_offset = 0 if lr_overridden else starting_step
+
     def lr_lambda(current_step):
-        actual_step = starting_step + current_step
-        if actual_step < base_warmup_steps:
-            return float(actual_step) / float(max(1, base_warmup_steps))
-        return max(0.1, 1.0 - (actual_step - base_warmup_steps) / (args.training_steps - base_warmup_steps))
+        actual_step = lr_schedule_offset + current_step
+        if warmup_steps > 0 and actual_step < warmup_steps:
+            return float(actual_step) / float(max(1, warmup_steps))
+        return max(0.1, 1.0 - (actual_step - warmup_steps) / (args.training_steps - warmup_steps))
     
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
@@ -322,6 +368,12 @@ def main():
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Initial learning rate: {current_lr:.2e}")
     
+    # If LR is explicitly overridden, skip optimizer/scheduler state to avoid restoring old LR.
+    if lr_overridden:
+        print("⚠️  --lr provided; skipping optimizer/scheduler state load to respect new LR")
+        optimizer_state_path = None
+        scheduler_state_path = None
+
     # Load optimizer and scheduler states if resuming
     if optimizer_state_path and optimizer_state_path.exists():
         print(f"Loading optimizer state from {optimizer_state_path}")
@@ -369,14 +421,37 @@ def main():
             scheduler_state_path = None
     
     # Print training config
+    # Setup augmentation pipeline
+    augmentation_transforms = None
+    if args.use_augmentation and AUGMENTATION_AVAILABLE:
+        if args.augmentation_strength == "conservative":
+            conservative = True
+        elif args.augmentation_strength == "minimal":
+            conservative = "minimal"
+        else:  # aggressive
+            conservative = False
+        
+        augmentation_transforms = get_augmentation_pipeline(
+            image_aug=True,
+            action_noise=False,  # Conservative: don't add noise to actions
+            temporal_crop=False,
+            conservative=conservative,
+        )
+        print(f"✅ Data augmentation enabled ({args.augmentation_strength})")
+    elif args.use_augmentation and not AUGMENTATION_AVAILABLE:
+        print("⚠️  Augmentation requested but augmentation_utils.py not found")
+    
     print("\n" + "="*60)
     print("Training Configuration")
     print("="*60)
     print(f"Training steps: {args.training_steps}")
     print(f"Starting step: {starting_step}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Gradient accumulation steps: {args.gradient_accumulation_steps}")
+    print(f"Effective batch size: {args.batch_size * args.gradient_accumulation_steps}")
     print(f"Learning rate: {args.lr}")
     print(f"Chunk size: {policy.config.chunk_size}")
+    print(f"Data augmentation: {'enabled' if augmentation_transforms else 'disabled'}")
     print(f"Checkpoint frequency: every {args.checkpoint_freq} steps")
     print("="*60 + "\n")
     
@@ -402,6 +477,7 @@ def main():
     step = starting_step
     done = False
     running_loss = 0.0
+    accumulation_counter = 0
     
     # Track timing for diagnostics
     batch_times = []
@@ -410,6 +486,11 @@ def main():
     while not done:
         for batch in dataloader:
             batch_start = time.time()
+            
+            # Apply augmentation before preprocessing
+            if augmentation_transforms:
+                batch = apply_augmentations(batch, augmentation_transforms)
+            
             # Use the preprocessor (handles all image/text processing efficiently!)
             batch = preprocessor(batch)
             
@@ -430,16 +511,26 @@ def main():
             
             # Forward pass
             loss, loss_dict = policy.forward(batch)
-            loss.backward()
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
-            scheduler.step()
+            # Scale loss by accumulation steps for correct gradient magnitude
+            scaled_loss = loss / args.gradient_accumulation_steps
+            scaled_loss.backward()
             
             running_loss += loss.item()
+            accumulation_counter += 1
+            
+            # Only update weights every N accumulation steps
+            should_update = accumulation_counter >= args.gradient_accumulation_steps
+            if should_update:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=10.0)
+                
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
+                scheduler.step()
+                
+                accumulation_counter = 0
+                step += 1
             
             # Track batch timing for first batches
             if len(batch_times) < first_batches:
@@ -448,47 +539,47 @@ def main():
                 if len(batch_times) == first_batches:
                     avg_time = sum(batch_times) / len(batch_times)
                     print(f"\n⏱️  Avg time/batch (first {first_batches}): {avg_time:.3f}s")
-                    print(f"   Est. time per {args.checkpoint_freq} steps: {avg_time * args.checkpoint_freq / 60:.1f}min\n")
+                    print(f"   Est. time per {args.checkpoint_freq} steps: {avg_time * args.checkpoint_freq * args.gradient_accumulation_steps / 60:.1f}min\n")
             
-            # Log progress
-            if step % args.log_freq == 0:
-                avg_loss = running_loss / args.log_freq if step > 0 else loss.item()
-                current_lr = scheduler.get_last_lr()[0]
+            # Only log/checkpoint after actual optimizer updates
+            if should_update:
+                # Log progress
+                if step % args.log_freq == 0:
+                    avg_loss = running_loss / (args.log_freq * args.gradient_accumulation_steps) if step > 0 else loss.item()
+                    current_lr = scheduler.get_last_lr()[0]
+                    
+                    # Log to wandb
+                    wandb.log({
+                        "loss": avg_loss,
+                        "learning_rate": current_lr,
+                        "step": step,
+                    })
+                    
+                    print(f"Step {step:5d}/{args.training_steps} | Loss: {avg_loss:.6f} | LR: {current_lr:.2e}")
+                    running_loss = 0.0
                 
-                # Log to wandb
-                wandb.log({
-                    "loss": avg_loss,
-                    "learning_rate": current_lr,
-                    "step": step,
-                })
+                # Save checkpoint
+                if step % args.checkpoint_freq == 0:
+                    checkpoint_dir = output_dir / f"checkpoint-{step}"
+                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"\n💾 Saving checkpoint at step {step}...")
+                    policy.save_pretrained(checkpoint_dir)
+                    preprocessor.save_pretrained(checkpoint_dir)
+                    postprocessor.save_pretrained(checkpoint_dir)
+                    
+                    # Save optimizer and scheduler states
+                    torch.save(optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
+                    torch.save(scheduler.state_dict(), checkpoint_dir / "scheduler.pt")
+                    
+                    print(f"✅ Checkpoint saved to {checkpoint_dir}\n")
                 
-                print(f"Step {step:5d}/{args.training_steps} | Loss: {avg_loss:.6f} | LR: {current_lr:.2e}")
-                running_loss = 0.0
-            
-            step += 1
-            
-            # Save checkpoint
-            if step % args.checkpoint_freq == 0:
-                checkpoint_dir = output_dir / f"checkpoint-{step}"
-                checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                print(f"\n💾 Saving checkpoint at step {step}...")
-                policy.save_pretrained(checkpoint_dir)
-                preprocessor.save_pretrained(checkpoint_dir)
-                postprocessor.save_pretrained(checkpoint_dir)
+                # Clear MPS cache periodically (not too often to avoid slowdown)
+                if device.type == "mps" and step % 500 == 0:
+                    torch.mps.empty_cache()
                 
-                # Save optimizer and scheduler states
-                torch.save(optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
-                torch.save(scheduler.state_dict(), checkpoint_dir / "scheduler.pt")
-                
-                print(f"✅ Checkpoint saved to {checkpoint_dir}\n")
-            
-            # Clear MPS cache periodically (not too often to avoid slowdown)
-            if device.type == "mps" and step % 500 == 0:
-                torch.mps.empty_cache()
-            
-            if step >= args.training_steps:
-                done = True
-                break
+                if step >= args.training_steps:
+                    done = True
+                    break
     
     # Save final model
     print(f"\n{'='*60}")

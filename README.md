@@ -94,6 +94,11 @@ python collect_lerobot_smolvla.py [OPTIONS]
 | `--gui` | flag | False | Show PyBullet GUI visualization |
 | `--fast` | flag | False | Fast mode (skip rendering delays) |
 | `--save-only-success` | flag | False | Only save successful grasps |
+| `--frame-stride` | int | 8 | Save a frame every N steps |
+| `--fine-distance` | float | 0.0 | Enable dense logging when EE is within this distance (meters) |
+| `--fine-frame-stride` | int | 1 | Frame stride inside fine-distance |
+| `--fine-action-scale` | float | 1.0 | Action scale inside fine-distance |
+| `--balance-tasks` | flag | False | Balance episodes across instruction variants |
 
 #### Examples
 
@@ -109,6 +114,16 @@ python collect_lerobot_smolvla.py --episodes 200 --save-only-success
 
 # Custom output location
 python collect_lerobot_smolvla.py --repo-id custom/my_dataset --root /data/lerobot
+
+# Balanced task collection with dense near-target frames
+python collect_lerobot_smolvla.py \
+    --episodes 500 \
+    --repo-id local/ur5_smolvla_grasp \
+    --balance-tasks \
+    --frame-stride 8 \
+    --fine-distance 0.05 \
+    --fine-frame-stride 1 \
+    --fine-action-scale 1.0
 ```
 
 ### Data Collection Process
@@ -426,16 +441,23 @@ python eval_smolvla_lerobot.py [OPTIONS]
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--checkpoint-dir` | str | Required | Path to trained model checkpoint |
-| `--num-episodes` | int | 10 | Number of evaluation episodes |
-| `--gui` | flag | False | Show PyBullet GUI |
-| `--save-videos` | flag | False | Save video recordings |
-| `--output-dir` | str | `./eval_results` | Output directory for results |
+| `--checkpoint-dir` | str | `./checkpoints/smolvla_full/checkpoint-60000` | Path to trained model checkpoint |
+| `--repo-id` | str | `local/ur5_smolvla_grasp` | Dataset repo ID (for stats) |
+| `--root` | str | `./datasets/lerobot` | Dataset root directory |
+| `--num-episodes` | int | 1 | Number of evaluation episodes |
+| `--max-steps` | int | 500 | Max steps per episode |
+| `--action-steps` | int | 1 | Actions per policy inference |
+| `--action-scale` | float | 4.0 | Scale XYZ action before IK |
+| `--ik-xyz-delta` | float | 0.08 | IK XYZ step size per action |
+| `--sim-steps-per-action` | int | 4 | Physics steps per control step |
+| `--print-actions` | flag | False | Print every action each step |
+| `--no-gui` | flag | False | Disable GUI visualization |
+| `--seed` | int | random | Random seed |
 
 #### Examples
 
 ```bash
-# Evaluate best model (10 episodes)
+# Evaluate best model (default settings)
 python eval_smolvla_lerobot.py \
     --checkpoint-dir ./checkpoints/smolvla_lerobot/final_model
 
@@ -444,6 +466,11 @@ python eval_smolvla_lerobot.py \
     --checkpoint-dir ./checkpoints/smolvla_lerobot/checkpoint-5000 \
     --num-episodes 2 \
     --gui
+
+# Match dataset cadence (frame stride 8 with sim_step 4)
+python eval_smolvla_lerobot.py \
+    --checkpoint-dir ./checkpoints/smolvla_full/checkpoint-60000 \
+    --sim-steps-per-action 32
 
 # Full eval with video recording
 python eval_smolvla_lerobot.py \
@@ -468,6 +495,8 @@ For each episode:
    - Update state/images
    - Check termination conditions
 5. **Record metrics**: Success, num steps, object type, final position
+
+Note: On step 0, eval prints language token shape and attention sum; if missing, the model is not conditioning on the instruction.
 
 
 ### Output Structure
@@ -512,4 +541,3 @@ If you use this code in research, please cite:
 ---
 
 **Last Updated**: January 2026
-

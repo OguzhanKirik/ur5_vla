@@ -356,3 +356,70 @@ python train_smolvla_lerobot_v2.py --resume --training-steps 20000
 - Start with small tests: `--max-samples 200 --training-steps 50`
 - Monitor wandb for loss curves
 - Save checkpoints frequently when training is unstable
+
+
+Eval: checkpoint-15000 | 10 episodes | seed 42
+
+   Ep  Target           MinDist  Approach  GripTry  GripObj  Lifted  Placed  GripStep
+  -----------------------------------------------------------------------------------
+    1  red cylinder       0.171        no      yes       no      no      no         2
+    2  green sphere       0.219        no      yes       no      no     yes         3
+    3  green sphere       0.255        no      yes       no      no      no         2
+    4  green sphere       0.253        no      yes       no      no      no         4
+    5  red sphere         0.177        no      yes       no      no      no         2
+    6  red sphere         0.045       yes      yes      yes      no     yes         2
+    7  blue cylinder      0.089        no      yes       no      no     yes         4
+    8  red sphere         0.160        no      yes       no      no      no         3
+    9  red cylinder       0.103        no      yes       no      no      no         2
+   10  red sphere         0.062        no      yes       no      no      no         3
+
+Aggregate (10 episodes):
+  Min distance to target:    0.153 +/- 0.072
+  Approach success (<5cm):   1/10 (10.0%)
+  Gripper attempted:         10/10 (100.0%)
+  Gripper at object:         1/10 (10.0%)
+  Object lifted:             0/10 (0.0%)
+  Place success:             3/10 (30.0%)
+  Mean action magnitude:     0.37 +/- 0.27
+  Mean path length:          8.68 +/- 5.44
+
+  Eval: checkpoint-25000 | 10 episodes | seed 42
+
+   Ep  Target           MinDist  Approach  GripTry  GripObj  Lifted  Placed  GripStep
+  -----------------------------------------------------------------------------------
+    1  red cylinder       0.228        no      yes       no     yes      no         2
+    2  green sphere       0.206        no      yes       no     yes     yes         4
+    3  green sphere       0.125        no      yes       no      no      no         2
+    4  green sphere       0.226        no      yes       no      no      no         4
+    5  red sphere         0.178        no      yes       no      no      no         3
+    6  red sphere         0.098        no      yes       no      no      no         2
+    7  blue cylinder      0.207        no      yes       no     yes     yes         7
+    8  red sphere         0.143        no      yes       no      no      no         4
+    9  red cylinder       0.034       yes      yes      yes      no      no         3
+   10  red sphere         0.085        no      yes       no      no      no         4
+
+Aggregate (10 episodes):
+  Min distance to target:    0.153 +/- 0.063
+  Approach success (<5cm):   1/10 (10.0%)
+  Gripper attempted:         10/10 (100.0%)
+  Gripper at object:         1/10 (10.0%)
+  Object lifted:             3/10 (30.0%)
+  Place success:             2/10 (20.0%)
+  Mean action magnitude:     0.33 +/- 0.23
+  Mean path length:          6.23 +/- 3.10
+
+Saved to: checkpoints/smolvla_full/checkpoint-25000/eval_metrics.json
+  The model is improving despite flat loss and flat min_dist. Key signals:                                                                                                                                
+                                                                                                                                                                                                          
+  - Object lifted went from 0% to 30% — this is the most meaningful change. The robot is actually picking things up now, even if approach distance hasn't improved. This likely means the grasps that do  
+  happen are more forceful/effective.                                                                                                                                                                     
+  - Path length dropped from 8.68 to 6.23 — trajectories are more efficient, less wandering.                                                                                                              
+  - Action magnitude variance dropped — more consistent motor commands.                                                                                                                                   
+                                                                                                                                                                                                          
+  The bottleneck is still gripper timing. The gripper still closes on steps 2-7, well before the robot reaches the object. The 3 lifts probably happened when objects spawned close to the starting arm   
+  position.                                                                                                                                                                                               
+                                                                                                                                                                                                          
+  The pattern suggests the model is learning how to grasp but not when. This is a common VLA training dynamic — spatial control improves faster than temporal sequencing. Further training should help,   
+  but if gripper_switch_step is still stuck at 2-7 by checkpoint 40-45k, that might indicate the training data doesn't have enough variety in approach duration or the model needs more steps to          
+  disentangle the approach/grasp phases.                                                                                                                                                                  
+                                                   

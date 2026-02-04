@@ -68,6 +68,13 @@ INSTRUCTION_VARIANTS = {
     ]
 }
 
+# Map each task string to its object index for balanced sampling.
+TASK_TO_OBJECT = {}
+for obj_idx in sorted(INSTRUCTION_VARIANTS.keys()):
+    for task_text in INSTRUCTION_VARIANTS[obj_idx]:
+        TASK_TO_OBJECT[task_text] = obj_idx
+ALL_TASKS = list(TASK_TO_OBJECT.keys())
+
 # Global flag for fast simulation
 FAST_SIM = False
 
@@ -179,8 +186,10 @@ def create_lerobot_features() -> dict:
     }
 
 
-def collect_grasp_episode(robot, controller, camera, target_object_id, container_pos, 
-                          table_height, dataset, instruction, distance_threshold=0.02):
+def collect_grasp_episode(robot, controller, camera, target_object_id, container_pos,
+                          table_height, dataset, instruction, distance_threshold=0.02,
+                          frame_stride=8, fine_distance=0.0, fine_frame_stride=1,
+                          fine_action_scale=1.0):
     """
     Collect one grasp-and-place episode using LeRobot API.
     Returns success status.
@@ -189,6 +198,22 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
     target_pos = np.array(target_pos)
     
     frame_count = 0
+    frame_stride = max(1, frame_stride)
+    fine_frame_stride = max(1, fine_frame_stride)
+
+    def should_add_frame(step, distance=None):
+        stride = frame_stride
+        if fine_distance > 0.0 and distance is not None and distance < fine_distance:
+            stride = max(1, fine_frame_stride)
+        return step % stride == 0
+
+    def compute_action_pos(delta, distance, coarse_scale):
+        if distance <= 0.001:
+            return np.zeros(3)
+        if fine_distance > 0.0 and distance < fine_distance:
+            scale = fine_action_scale / max(fine_distance, 1e-6)
+            return np.clip(delta * scale, -1, 1)
+        return np.clip((delta / distance) * coarse_scale, -1, 1)
     
     def add_frame(action):
         """Add a frame to the dataset"""
@@ -218,16 +243,13 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         if distance < distance_threshold:
             break
         
-        if distance > 0.001:
-            action_pos = np.clip((delta / distance) * 5.0, -1, 1)
-        else:
-            action_pos = np.zeros(3)
+        action_pos = compute_action_pos(delta, distance, coarse_scale=5.0)
         
         action = np.concatenate([action_pos, [0, 0, 0], [1]])
         controller.process_action(action)
         sim_step(4)
         
-        if step % 8 == 0:
+        if should_add_frame(step, distance):
             add_frame(action)
     
     # Phase 2: Descend to grasp (1cm above)
@@ -242,16 +264,13 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         if distance < distance_threshold:
             break
         
-        if distance > 0.001:
-            action_pos = np.clip((delta / distance) * 5.0, -1, 1)
-        else:
-            action_pos = np.zeros(3)
+        action_pos = compute_action_pos(delta, distance, coarse_scale=5.0)
         
         action = np.concatenate([action_pos, [0, 0, 0], [1]])
         controller.process_action(action)
         sim_step(4)
         
-        if step % 8 == 0:
+        if should_add_frame(step, distance):
             add_frame(action)
     
     # Phase 3: Close gripper
@@ -278,7 +297,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
                 sim_step(10)
                 break
         
-        if close_step % 8 == 0:
+        if close_step % frame_stride == 0:
             action = np.array([0, 0, 0, 0, 0, 0, -1], dtype=np.float32)
             add_frame(action)
     
@@ -298,10 +317,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         if distance < distance_threshold:
             break
         
-        if distance > 0.001:
-            action_pos = np.clip((delta / distance) * 5.0, -1, 1)
-        else:
-            action_pos = np.zeros(3)
+        action_pos = compute_action_pos(delta, distance, coarse_scale=5.0)
         
         # Maintain grip
         for i, joint_idx in enumerate(robot.gripper_joint_indices):
@@ -316,7 +332,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         controller.process_action(action)
         sim_step(4)
         
-        if step % 8 == 0:
+        if should_add_frame(step, distance):
             add_frame(action)
     
     # Phase 5: Move to container
@@ -330,10 +346,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         if distance < distance_threshold:
             break
         
-        if distance > 0.001:
-            action_pos = np.clip((delta / distance) * 5.0, -1, 1)
-        else:
-            action_pos = np.zeros(3)
+        action_pos = compute_action_pos(delta, distance, coarse_scale=5.0)
         
         for i, joint_idx in enumerate(robot.gripper_joint_indices):
             p.setJointMotorControl2(
@@ -347,7 +360,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         controller.process_action(action)
         sim_step(4)
         
-        if step % 8 == 0:
+        if should_add_frame(step, distance):
             add_frame(action)
     
     # Phase 6: Release
@@ -356,7 +369,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
     for step in range(50):
         sim_step(4)
         
-        if step % 8 == 0:
+        if step % frame_stride == 0:
             action = np.array([0, 0, 0, 0, 0, 0, 1], dtype=np.float32)
             add_frame(action)
     
@@ -364,7 +377,7 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
     for step in range(100):
         sim_step(1)
         
-        if step % 8 == 0:
+        if step % frame_stride == 0:
             action = np.array([0, 0, 0, 0, 0, 0, 1], dtype=np.float32)
             add_frame(action)
     
@@ -379,16 +392,13 @@ def collect_grasp_episode(robot, controller, camera, target_object_id, container
         if distance < 0.02:
             break
         
-        if distance > 0.001:
-            action_pos = np.clip((delta / distance) * 2.0, -1, 1)
-        else:
-            action_pos = np.zeros(3)
+        action_pos = compute_action_pos(delta, distance, coarse_scale=2.0)
         
         action = np.concatenate([action_pos, [0, 0, 0], [1]])
         controller.process_action(action)
         sim_step(4)
         
-        if step % 8 == 0:
+        if should_add_frame(step, distance):
             add_frame(action)
     
     # Check success
@@ -406,6 +416,16 @@ def main():
     parser.add_argument("--gui", action="store_true", help="Show PyBullet GUI")
     parser.add_argument("--fast", action="store_true", help="Fast mode (no sleeps)")
     parser.add_argument("--save-only-success", action="store_true", help="Only save successful episodes")
+    parser.add_argument("--balance-tasks", action="store_true",
+                        help="Sample tasks to keep episode counts balanced")
+    parser.add_argument("--frame-stride", type=int, default=8,
+                        help="Save a frame every N steps (default: 8)")
+    parser.add_argument("--fine-distance", type=float, default=0.0,
+                        help="When distance < this (m), use fine logging/scale (0 disables)")
+    parser.add_argument("--fine-frame-stride", type=int, default=1,
+                        help="Frame stride when within fine-distance")
+    parser.add_argument("--fine-action-scale", type=float, default=1.0,
+                        help="Action scale multiplier used within fine-distance")
     
     args = parser.parse_args()
     
@@ -415,7 +435,14 @@ def main():
     print(f"Episodes: {args.episodes}")
     print(f"Repo ID: {args.repo_id}")
     print(f"Root: {args.root}")
+    print(f"Frame stride: {args.frame_stride}")
+    if args.fine_distance > 0.0:
+        print(f"Fine distance: {args.fine_distance} | fine stride: {args.fine_frame_stride} | fine scale: {args.fine_action_scale}")
+    print(f"Balanced tasks: {args.balance_tasks}")
     print("="*70)
+
+    args.frame_stride = max(1, args.frame_stride)
+    args.fine_frame_stride = max(1, args.fine_frame_stride)
     
     global FAST_SIM
     FAST_SIM = bool(args.fast and not args.gui)
@@ -492,6 +519,7 @@ def main():
     # Collect episodes
     successful_episodes = 0
     total_frames = 0
+    task_counts = {task: 0 for task in ALL_TASKS}
     
     for episode_idx in tqdm(range(args.episodes), desc="Collecting episodes"):
         # Clear previous objects if not first episode
@@ -514,14 +542,24 @@ def main():
         
         sim_step(100)
         
-        # Select random object
-        target_idx = np.random.randint(0, len(spawned_ids))
-        instruction = np.random.choice(INSTRUCTION_VARIANTS[target_idx])
+        # Select task/object
+        if args.balance_tasks:
+            min_count = min(task_counts.values())
+            candidates = [t for t, c in task_counts.items() if c == min_count]
+            instruction = np.random.choice(candidates)
+            target_idx = TASK_TO_OBJECT[instruction]
+        else:
+            target_idx = np.random.randint(0, len(spawned_ids))
+            instruction = np.random.choice(INSTRUCTION_VARIANTS[target_idx])
         
         # Collect episode
         success, frame_count = collect_grasp_episode(
             robot, controller, camera, spawned_ids[target_idx],
-            container_pos, table_height, dataset, instruction
+            container_pos, table_height, dataset, instruction,
+            frame_stride=args.frame_stride,
+            fine_distance=args.fine_distance,
+            fine_frame_stride=args.fine_frame_stride,
+            fine_action_scale=args.fine_action_scale
         )
         
         # Save or discard episode
@@ -534,6 +572,8 @@ def main():
             total_frames += frame_count
             if success:
                 successful_episodes += 1
+            if args.balance_tasks:
+                task_counts[instruction] += 1
             print(f"Episode {episode_idx}: {object_names[target_idx]} - {'SUCCESS' if success else 'FAILED'} ({frame_count} frames)")
     
     # Finalize dataset
@@ -550,6 +590,10 @@ def main():
     print(f"Total frames: {total_frames}")
     print(f"Dataset location: {dataset.root}")
     print(f"Repo ID: {args.repo_id}")
+    if args.balance_tasks:
+        print("Task counts:")
+        for task, count in sorted(task_counts.items()):
+            print(f"  {count:4d} | {task}")
     print("="*70)
     print("\nTo train with this dataset:")
     print(f"  python train_smolvla.py --dataset-dir {dataset.root}")

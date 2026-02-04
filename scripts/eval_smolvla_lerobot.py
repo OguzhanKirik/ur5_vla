@@ -54,6 +54,34 @@ OBJECT_INSTRUCTIONS = {
     3: "Pick up the red cylinder and place it in the container",
 }
 
+# Alternative phrasings for evaluation variation
+INSTRUCTION_VARIANTS = {
+    0: [
+        "Pick up the red sphere and place it in the container",
+        "Grasp the red ball and move it to the box",
+        "Take the red sphere to the container",
+        "Put the red sphere in the container",
+    ],
+    1: [
+        "Grasp the green sphere and put it in the box",
+        "Pick up the green ball and place it in the container",
+        "Take the green sphere to the box",
+        "Move the green sphere to the container",
+    ],
+    2: [
+        "Pick up the blue cylinder and drop it in the container",
+        "Grasp the blue cylinder and place it in the box",
+        "Take the blue cylinder to the container",
+        "Move the blue cylinder into the box",
+    ],
+    3: [
+        "Pick up the red cylinder and place it in the container",
+        "Grasp the red cylinder and move it to the box",
+        "Take the red cylinder to the container",
+        "Put the red cylinder in the container",
+    ],
+}
+
 
 def sim_step(n: int = 1) -> None:
     """Perform `n` physics steps."""
@@ -142,9 +170,14 @@ def load_model(checkpoint_dir, device):
         policy.config.input_features['observation.state'] = new_state_feature
         policy.config.max_state_dim = max(policy.config.max_state_dim, 8)
     
+    # Remove camera3 if present (our setup only uses 2 cameras)
+    if "observation.images.camera3" in policy.config.input_features:
+        del policy.config.input_features["observation.images.camera3"]
+        print("Removed observation.images.camera3 from config (dataset has 2 cameras)")
+
     policy.eval()
     policy.to(device)
-    
+
     print(f"Policy loaded: {sum(p.numel() for p in policy.parameters()):,} parameters")
     print(f"  Action feature: {policy.config.action_feature.shape}")
     print(f"  State feature: {policy.config.input_features['observation.state'].shape}")
@@ -217,9 +250,15 @@ def preprocess_obs(obs, policy, observation_history):
 
 
 def run_episode(robot, controller, camera, objects, table_height, policy, device,
-                episode_id, preprocessor, postprocessor, max_steps=500):
+                episode_id, preprocessor, postprocessor, max_steps=500, n_action_steps=10,
+                action_scale=1.0, print_actions=False, sim_steps_per_action=4):
     """Run a single evaluation episode."""
     
+    # Ensure action queue is cleared between episodes.
+    policy.reset()
+    # Re-plan every N steps to reduce model calls while staying responsive.
+    policy.config.n_action_steps = n_action_steps
+
     # Reset robot to home position
     robot.reset_to_home()
     sim_step(50)
@@ -237,9 +276,10 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
     objects.create_container_box(position=container_pos, size=[0.15, 0.15, 0.08])
     sim_step(100)
     
-    # Select green sphere (index 1) for testing
-    target_idx = 1  # 0=red sphere, 1=green sphere, 2=blue cylinder, 3=red cylinder
-    task_instruction = OBJECT_INSTRUCTIONS[target_idx]
+    # Select random target for testing
+    target_idx = np.random.randint(0, len(spawned_ids))
+    variants = INSTRUCTION_VARIANTS.get(target_idx, [OBJECT_INSTRUCTIONS[target_idx]])
+    task_instruction = np.random.choice(variants)
     target_object_id = spawned_ids[target_idx]
     
     object_names = ["red sphere", "green sphere", "blue cylinder", "red cylinder"]
@@ -257,7 +297,7 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
     print(f"\nInitial state:")
     print(f"  Robot joint positions: {robot_state[:6]}")
     print(f"  End-effector position: {ee_pos}")
-    print(f"  Target (green sphere) position: {obj_pos}")
+    print(f"  Target ({object_names[target_idx]}) position: {obj_pos}")
     print(f"  Distance to target: {np.linalg.norm(np.array(obj_pos) - np.array(ee_pos)):.4f}")
     print()
     
@@ -303,7 +343,7 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
             'state': torch.from_numpy(obs['state']).float(),
         })
         
-        sim_step(4)
+        sim_step(sim_steps_per_action)
     
     print(f"Observation history built with {len(observation_history)} frames")
     
@@ -323,6 +363,7 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
     
     print("Starting robot control...\n")
     
+    prev_ee_pos = None
     for step in range(max_steps):
         # Get current observation
         state = get_robot_state(robot)
@@ -386,10 +427,16 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
                 print(f"   camera2 shape: {img2.shape}, range: [{img2.min():.3f}, {img2.max():.3f}]")
             print(f"\n📝 Task: {task_instruction}")
             print(f"   Batch keys: {list(batch.keys())}")
-            if 'input_ids' in batch:
-                print(f"   Tokenized task length: {batch['input_ids'].shape if hasattr(batch['input_ids'], 'shape') else len(batch['input_ids'])} tokens")
+            lang_tokens_key = "observation.language.tokens"
+            lang_mask_key = "observation.language.attention_mask"
+            if lang_tokens_key in batch and lang_mask_key in batch:
+                tokens = batch[lang_tokens_key]
+                masks = batch[lang_mask_key]
+                token_shape = tokens.shape if hasattr(tokens, "shape") else (len(tokens),)
+                mask_sum = int(masks.sum().item()) if hasattr(masks, "sum") else None
+                print(f"   Tokenized task: {token_shape} | attention sum: {mask_sum}")
             else:
-                print(f"   ⚠️ WARNING: No 'input_ids' in batch! Task not tokenized!")
+                print(f"   ⚠️ WARNING: Missing language tokens; model will ignore task.")
             print()
         
         # Handle action dimensions - model may output 6 or 7 dims
@@ -400,18 +447,19 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
             # Pad to 7 if needed
             action = np.concatenate([action, np.zeros(7 - len(action))])
         
-        # Clip joint angles to safe range (denormalized actions in radians)
-        # Most UR5 joints: -2π to 2π
-        action[:6] = np.clip(action[:6], -6.28, 6.28)
+        # IK controller expects normalized deltas in [-1, 1]
+        # Scale XYZ together so the robot can reach the target.
+        action[:3] = np.clip(action[:3] * action_scale, -1.0, 1.0)
+        action[3:6] = np.clip(action[3:6], -1.0, 1.0)
         action[6] = np.clip(action[6], -1.0, 1.0)  # Gripper: [-1, 1]
         
-        # DEBUG: Print action every 50 steps
-        if step % 50 == 0:
+        # DEBUG: Print action every step if requested, otherwise every 50 steps
+        if print_actions or step % 50 == 0:
             print(f"  Step {step:3d}: joints={action[:6]} | gripper={action[6]:.2f}")
         
         # Execute action
         controller.process_action(action[:7])  # Use first 7 elements
-        sim_step(4)
+        sim_step(sim_steps_per_action)
         
         # Check gripper command
         if action[6] < 0:
@@ -419,12 +467,15 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
         else:
             robot.set_gripper(1)
         
+        ee_pos, _ = robot.get_end_effector_pose()
+        dz = 0.0 if prev_ee_pos is None else (ee_pos[2] - prev_ee_pos[2])
+        prev_ee_pos = ee_pos
+
         if step % 50 == 0:
             # Get object position for distance check
             obj_pos, _ = p.getBasePositionAndOrientation(target_object_id)
-            ee_pos, _ = robot.get_end_effector_pose()
             distance = np.linalg.norm(np.array(obj_pos) - np.array(ee_pos))
-            print(f"  Distance to target: {distance:.4f}")
+            print(f"  Distance to target: {distance:.4f} | action_z={action[2]:.3f} | dz={dz:.4f}")
     
     # Check success - object in container
     obj_pos, _ = p.getBasePositionAndOrientation(target_object_id)
@@ -445,24 +496,36 @@ def run_episode(robot, controller, camera, objects, table_height, policy, device
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate SmolVLA policy on UR5 grasping")
-    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/smolvla_lerobot/final_model",
+    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints/smolvla_full/checkpoint-60000",
                         help="Path to checkpoint directory")
     parser.add_argument("--repo-id", type=str, default="local/ur5_smolvla_grasp",
                         help="Dataset repo ID (for metadata/stats)")
-    parser.add_argument("--root", type=str, default="../../datasets_/lerobot",
+    parser.add_argument("--root", type=str, default="./datasets/lerobot",
                         help="Dataset root directory")
     parser.add_argument("--num-episodes", type=int, default=1,
                         help="Number of evaluation episodes")
     parser.add_argument("--max-steps", type=int, default=500,
                         help="Maximum steps per episode")
+    parser.add_argument("--action-steps", type=int, default=5,
+                        help="Number of actions to execute per policy inference")
+    parser.add_argument("--action-scale", type=float, default=1.0,
+                        help="Scale XYZ action before IK (1.0 = no scaling)")
+    parser.add_argument("--ik-xyz-delta", type=float, default=0.08,
+                        help="IK XYZ step size per action")
+    parser.add_argument("--sim-steps-per-action", type=int, default=32,
+                        help="Physics steps per control step (use 32 to match dataset cadence)")
+    parser.add_argument("--print-actions", action="store_true",
+                        help="Print every action each step")
     parser.add_argument("--no-gui", action="store_true",
                         help="Disable GUI visualization")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed (omit for random behavior)")
     
     args = parser.parse_args()
     
-    # Set seeds for reproducibility
+    # Set seeds for reproducibility (or randomize if not provided)
+    if args.seed is None:
+        args.seed = int(time.time() * 1000) % (2**32)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     
@@ -476,7 +539,17 @@ def main():
     
     print(f"Using device: {device}")
     print(f"PyTorch version: {torch.__version__}")
-    
+
+    # If root is wrong relative to cwd, fall back to the script-local dataset.
+    root_path = Path(args.root)
+    if not (root_path / "meta" / "info.json").exists():
+        alt_root = Path(__file__).resolve().parent / "datasets" / "lerobot"
+        if (alt_root / "meta" / "info.json").exists():
+            print(f"⚠️  Dataset root not found at {root_path}; using {alt_root}")
+            args.root = str(alt_root)
+        else:
+            print(f"⚠️  Dataset root not found at {root_path}; expected meta/info.json")
+
     # Load model
     policy = load_model(args.checkpoint_dir, device)
     
@@ -522,7 +595,7 @@ def main():
     controller = RobotController(
         robot_component=robot,
         control_mode="inverse_kinematics",
-        ik_xyz_delta=0.05,
+        ik_xyz_delta=args.ik_xyz_delta,
         ik_rpy_delta=0.05
     )
     
@@ -546,7 +619,9 @@ def main():
             result = run_episode(
                 robot, controller, camera, objects, table_height,
                 policy, device, episode_id, preprocessor, postprocessor,
-                max_steps=args.max_steps
+                max_steps=args.max_steps, n_action_steps=args.action_steps,
+                action_scale=args.action_scale, print_actions=args.print_actions,
+                sim_steps_per_action=args.sim_steps_per_action
             )
             results.append(result)
     
